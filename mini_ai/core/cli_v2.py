@@ -227,18 +227,16 @@ def build_config_v2(args: argparse.Namespace) -> Optional[AppConfig]:
         else:
             model = auto_choose_model(config.models_dir)
 
-    if not model:
-        return None
-    if not model.exists():
-        err(f"Model not found: {model}")
-        return None
+    if not model or not model.exists():
+        logger.warn(f"Model not found: {model}. CLI will start without an active agent.")
+        model = None
 
     cli_bin = find_llama_cli(args.bin) or config.llama_cli_bin
     server_bin = find_llama_server(args.server_bin, cli_bin) or config.llama_server_bin
 
     if not server_bin:
-        err("llama-server not found. Pass --server-bin explicitly.")
-        return None
+        logger.warn("llama-server not found. Auto-agent features will be disabled.")
+        server_bin = None
 
     env = get_environment()
     is_low_end = args.low_end or (env.cpu_count <= 2 and (env.ram_mb or 4096) < 4096)
@@ -499,7 +497,7 @@ def main() -> int:
             legacy_config = Config.from_app_config(config, config.agent_model, role="agent")
             server_proc = start_server(legacy_config)
             if not server_proc:
-                return 1
+                logger.warn("Primary agent model failed to start. Local commands only.")
 
         server_url = config.agent_model.base_url
         if not run_health_checks(config, server_url):
@@ -537,7 +535,10 @@ def main() -> int:
                     config.ui_model = None
         
         # Main loop
-        ok(f"Agent model: {config.agent_model.model_path.name if config.agent_model.model_path else 'none'}")
+        if config.agent_model.model_path:
+            ok(f"Agent model: {config.agent_model.model_path.name}")
+        else:
+            err("No agent model loaded. LLM features disabled.")
         if getattr(config, "tri_model", False):
             if config.analyzer_model:
                 ok(f"Analyzer model: {config.analyzer_model.model_path.name if config.analyzer_model.model_path else 'none'}")

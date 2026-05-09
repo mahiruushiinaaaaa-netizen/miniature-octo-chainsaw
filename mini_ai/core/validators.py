@@ -413,6 +413,11 @@ OPTIONAL_DEPS: list[DependencySpec] = [
         optional=True,
         reason="High-quality audio streaming and playback (required for music)",
     ),
+    DependencySpec(
+        name="psutil",
+        optional=True,
+        reason="Resource monitoring and sandbox management",
+    ),
 ]
 
 

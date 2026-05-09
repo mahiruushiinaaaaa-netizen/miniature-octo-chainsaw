@@ -87,6 +87,8 @@
 - **Repository Initialization & Push**: Created `.gitignore`, committed the modular codebase, and successfully pushed to the GitHub repository: `https://github.com/mahiruushiinaaaaa-netizen/miniature-octo-chainsaw`.
 - **Sandbox Security & Hardening**: Implemented `CommandRiskScorer` for heuristic command risk assessment, `ResourceMonitor` for process tracking, and integrated mandatory path validation. Updated `ToolExecutor` to enforce high-risk command approval.
 - **Environment Inspection Upgrade**: Added Docker detection to `environment_inspector.py` and improved binary versioning for Windows environments.
+- **Startup Resilience**: Improved CLI robustness to allow the application to start even if the AI model fails to initialize or the backend server fails to start.
+- **Optional Dependency Handling**: Made `psutil` an optional dependency in the sandbox security layer, preventing startup crashes when the library is missing.
 
 #### Next
 - Scaffold the React Native project in the Downloads folder as requested.

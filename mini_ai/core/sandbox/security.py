@@ -1,5 +1,8 @@
-import os
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 from typing import Dict, List, Tuple
 from pathlib import Path
 
@@ -7,22 +10,27 @@ class ResourceMonitor:
     """Monitors resource usage of sandbox processes."""
     def __init__(self, pid: int):
         self.pid = pid
-        try:
-            self.process = psutil.Process(pid)
-        except psutil.NoSuchProcess:
-            self.process = None
+        self.process = None
+        if psutil:
+            try:
+                self.process = psutil.Process(pid)
+            except Exception:
+                self.process = None
 
     def get_usage(self) -> Dict[str, float]:
         """Returns CPU and Memory usage."""
-        if not self.process or not self.process.is_running():
+        if not psutil or not self.process:
             return {"cpu_percent": 0.0, "memory_mb": 0.0}
         
         try:
+            if not self.process.is_running():
+                return {"cpu_percent": 0.0, "memory_mb": 0.0}
+            
             return {
                 "cpu_percent": self.process.cpu_percent(interval=0.1),
                 "memory_mb": self.process.memory_info().rss / (1024 * 1024)
             }
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except Exception:
             return {"cpu_percent": 0.0, "memory_mb": 0.0}
 
 class CommandRiskScorer:
