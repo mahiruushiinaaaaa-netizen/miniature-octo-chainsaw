@@ -56,7 +56,7 @@ class ModelConfig:
 class AppConfig:
     """Application configuration."""
     # Paths
-    models_dir: Path = field(default_factory=lambda: Path.home() / ".lmstudio" / "models")
+    models_dir: Path = field(default_factory=lambda: Path("E:/allfiles/agents/driaforall"))
     workspace: Path = field(default_factory=lambda: Path.cwd())
     
     # Binaries (auto-detected if None)
@@ -253,7 +253,10 @@ class ConfigManager:
         """Find models directory from common locations."""
         candidates = []
         
-        # 1. Check current directory and parents (Smarter zero-config discovery)
+        # 1. User preferred path
+        candidates.append(Path("E:/allfiles/agents/driaforall"))
+        
+        # 2. Check current directory and parents (Smarter zero-config discovery)
         try:
             curr = Path.cwd()
             # Search up to 3 levels up for a 'models' folder

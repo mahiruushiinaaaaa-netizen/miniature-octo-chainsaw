@@ -38,7 +38,7 @@ logger = get_logger("config")
 class Config:
     """Legacy Config class for backward compatibility with backend.py and other modules."""
     model: Path | None = None
-    models_dir: Path = field(default_factory=lambda: Path.home() / ".lmstudio" / "models")
+    models_dir: Path = field(default_factory=lambda: Path("E:/allfiles/agents/driaforall"))
     cli_bin: Path | None = None
     server_bin: Path | None = None
     threads: int = 4
