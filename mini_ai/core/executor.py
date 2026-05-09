@@ -43,6 +43,7 @@ from .metrics import get_metrics_collector
 from .recovery import RecoveryManager
 from .errors import ExecutionError, ErrorContext
 from .environment_inspector import inspect_environment
+from .sandbox.security import CommandRiskScorer
 
 
 @dataclass
@@ -411,9 +412,17 @@ class ToolExecutor:
         cmd_parts = cmd.split()
         cmd_base = cmd_parts[0].lower() if cmd_parts else ""
         
-        # Block known destructive patterns immediately
+        # Risk assessment
+        risk_score = CommandRiskScorer.get_risk_score(cmd)
+        
+        if risk_score == 2:
+             # High risk: ALWAYS ask for approval unless explicitly forced by ay (but even then, maybe ask)
+             if not confirm(f"HIGH RISK COMMAND DETECTED: {cmd}\nAre you absolutely sure?"):
+                 return False, self.result(False, "User rejected high-risk command.")
+
+        # Block known destructive patterns (fallback if risk scorer missed something or if we want hard blocks)
         destructive_patterns = ["rm -rf", "del /s", "format", "rd /s", "mkfs", "dd if="]
-        if any(p in cmd.lower() for p in destructive_patterns):
+        if any(p in cmd.lower() for p in destructive_patterns) and risk_score < 2:
              return False, self.result(False, f"Command blocked for safety (destructive pattern): {cmd}")
 
         # Strict whitelist enforcement
@@ -425,7 +434,7 @@ class ToolExecutor:
              except Exception:
                  return False, self.result(False, f"Command blocked: {cmd_base}")
 
-        if not ay and not should_auto_approve():
+        if not ay and not should_auto_approve(destructive=(risk_score > 0)):
             if not confirm(f"Run command in {cwd}: {cmd}?"):
                 return False, self.result(False, "User cancelled command")
 

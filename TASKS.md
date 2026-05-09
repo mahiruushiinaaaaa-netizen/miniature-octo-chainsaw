@@ -85,6 +85,8 @@
 - **Real-Time Thought Streaming**: Fixed a bug in `orchestrator.py` where the `on_token` handler was not passed to the agent, now enabling live visibility into the agent's reasoning process during orchestration.
 - Updated `agent.py` system prompt with a strict rule (Rule #10) to avoid chained commands and perform operations one atomic step at a time.
 - **Repository Initialization & Push**: Created `.gitignore`, committed the modular codebase, and successfully pushed to the GitHub repository: `https://github.com/mahiruushiinaaaaa-netizen/miniature-octo-chainsaw`.
+- **Sandbox Security & Hardening**: Implemented `CommandRiskScorer` for heuristic command risk assessment, `ResourceMonitor` for process tracking, and integrated mandatory path validation. Updated `ToolExecutor` to enforce high-risk command approval.
+- **Environment Inspection Upgrade**: Added Docker detection to `environment_inspector.py` and improved binary versioning for Windows environments.
 
 #### Next
 - Scaffold the React Native project in the Downloads folder as requested.

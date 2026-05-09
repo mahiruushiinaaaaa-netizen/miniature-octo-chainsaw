@@ -33,7 +33,7 @@ def get_binary_version(binary: str) -> str:
 
 def inspect_environment() -> Dict[str, Any]:
     """Detect system capabilities and environment details."""
-    binaries = ["php", "composer", "node", "npm", "git", "python", "pip"]
+    binaries = ["php", "composer", "node", "npm", "git", "python", "pip", "docker"]
     results = {
         "os": platform.system(),
         "os_release": platform.release(),
