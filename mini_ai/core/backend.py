@@ -132,7 +132,7 @@ def start_server(config: Config):
         text=True,
     )
 
-    deadline = time.time() + 60
+    deadline = time.time() + 120
     while time.time() < deadline:
         if proc.poll() is not None:
             err("llama-server exited during startup")
@@ -148,8 +148,8 @@ def start_server(config: Config):
 
     proc.terminate()
     err("Server start timed out")
-    logger.error("Server start timed out after 60s", operation="server_start")
-    metrics.record_operation("server_start", 60000, success=False)
+    logger.error("Server start timed out after 120s", operation="server_start")
+    metrics.record_operation("server_start", 120000, success=False)
     return None
 
 

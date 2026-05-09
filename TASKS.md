@@ -87,6 +87,8 @@
 - **Repository Initialization & Push**: Created `.gitignore`, committed the modular codebase, and successfully pushed to the GitHub repository: `https://github.com/mahiruushiinaaaaa-netizen/miniature-octo-chainsaw`.
 - **Sandbox Security & Hardening**: Implemented `CommandRiskScorer` for heuristic command risk assessment, `ResourceMonitor` for process tracking, and integrated mandatory path validation. Updated `ToolExecutor` to enforce high-risk command approval.
 - **Environment Inspection Upgrade**: Added Docker detection to `environment_inspector.py` and improved binary versioning for Windows environments.
+- **Model Load Optimization**: Increased the global model server startup timeout and low-end mode request timeout to 120 seconds to accommodate slower hardware and larger models.
+- **Sandbox IDE Implementation**: Developed a full-featured Sandbox IDE component within the GUI, featuring a file explorer, integrated code editor, stateful terminal, and real-time resource monitor.
 - **Sandbox IDE Implementation**: Developed a full-featured Sandbox IDE component within the GUI, featuring a file explorer, integrated code editor, stateful terminal, and real-time resource monitor.
 - **GUI Integration**: Seamlessly integrated the Sandbox IDE into the `MiniAIApp` as a new primary navigation tab with automatic workspace and configuration synchronization.
 - **Startup Resilience**: Improved CLI robustness to allow the application to start even if the AI model fails to initialize or the backend server fails to start.

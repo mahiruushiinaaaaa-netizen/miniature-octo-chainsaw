@@ -245,7 +245,7 @@ def build_config_v2(args: argparse.Namespace) -> Optional[AppConfig]:
         logger.info("Low-end mode enabled: using optimized settings")
         threads = min(2, max(1, env.cpu_count - 1))
         ctx = 512 if (env.ram_mb or 4096) > 3000 else 384
-        timeout = 60
+        timeout = 120
         agent_tokens = 64
     else:
         threads = max(1, args.threads)
