@@ -40,7 +40,11 @@ Use `/help` inside the CLI to see the full list of available slash commands.
 
 ## Documentation
 - [Tool Calling Guide](DOCS/TOOL_CALLING.md) — Understanding how the agent interacts with your system.
+- [Orchestrator Guide](DOCS/ORCHESTRATOR.md) — Mastering the Tri-Model orchestration pipeline.
 - [Sandbox Plan](sandbox_plan.md) — Roadmap for advanced, stateful command execution.
+
+## Repository Status
+This project is currently managed via Git. All core features have been committed to the local `master` branch.
 
 ## Notes
 Built as an efficient, memory-safe alternative to Aider for low-resource environments.
