@@ -23,6 +23,8 @@ from ..agents.agent import agent_mode
 from ..core.cli import build_config, parse_args
 from ..core.memory import PersistentMemory
 from ..core.settings import save_settings
+from ..core.path_manager import PathManager
+from .sandbox_ide import SandboxIDE
 
 # ── Colour palette (dark theme) ────────────────────────────────────────────────
 BG       = "#0f1117"     # window background
@@ -101,6 +103,7 @@ class MiniAIApp(tk.Tk):
         self._memory = None
         self._chat_history: list[dict] = []  # [{role, content}]
         self._workspace = Path.cwd()
+        self._pm = PathManager(self._workspace)
         self._autopilot = False
 
         _style_ttk(self)
@@ -150,6 +153,7 @@ class MiniAIApp(tk.Tk):
             return b
 
         nav_btn("Chat", "💬", lambda: self._show_tab("chat"))
+        nav_btn("Sandbox IDE", "💻", lambda: self._show_tab("ide"))
         nav_btn("Settings", "⚙", lambda: self._show_tab("settings"))
         nav_btn("Memory", "🧠", lambda: self._show_tab("memory"))
         nav_btn("Commands", "⚡", lambda: self._show_tab("commands"))
@@ -201,17 +205,19 @@ class MiniAIApp(tk.Tk):
         self._notebook.pack(fill=tk.BOTH, expand=True)
 
         self._tab_chat = self._build_chat_tab()
+        self._tab_ide = self._build_ide_tab()
         self._tab_settings = self._build_settings_tab()
         self._tab_memory = self._build_memory_tab()
         self._tab_commands = self._build_commands_tab()
 
         self._notebook.add(self._tab_chat, text="  💬 Chat  ")
+        self._notebook.add(self._tab_ide, text="  💻 Sandbox IDE  ")
         self._notebook.add(self._tab_settings, text="  ⚙ Settings  ")
         self._notebook.add(self._tab_memory, text="  🧠 Memory  ")
         self._notebook.add(self._tab_commands, text="  ⚡ Run Command  ")
 
     def _show_tab(self, name: str):
-        mapping = {"chat": 0, "settings": 1, "memory": 2, "commands": 3}
+        mapping = {"chat": 0, "ide": 1, "settings": 2, "memory": 3, "commands": 4}
         if name in mapping:
             self._notebook.select(mapping[name])
 
@@ -398,6 +404,13 @@ class MiniAIApp(tk.Tk):
 
         return frame
 
+    def _build_ide_tab(self) -> tk.Frame:
+        """Construct the Sandbox IDE tab."""
+        # Note: SandboxIDE requires _pm and _config. 
+        # Since _config is loaded asynchronously, we'll handle its injection later or pass it as None.
+        self.ide = SandboxIDE(self._notebook, self._config, self._pm)
+        return self.ide
+
     # ── Memory tab ────────────────────────────────────────────────────────────
 
     def _build_memory_tab(self) -> tk.Frame:
@@ -541,6 +554,8 @@ class MiniAIApp(tk.Tk):
 
     def _on_config_loaded(self, model_name: str):
         self._model_label.configure(text=f"Model: {model_name}", fg=FG2)
+        if hasattr(self, 'ide'):
+            self.ide.config = self._config
         self._set_status("Ready", ok=True)
         self._append_system("Mini AI ready. Type a message to start.")
 
@@ -829,8 +844,12 @@ class MiniAIApp(tk.Tk):
         if d:
             self._workspace = Path(d)
             self._ws_label.configure(text=self._workspace.name)
+            self._pm = PathManager(self._workspace)
             if self._config:
                 self._config.workspace = self._workspace
+            if hasattr(self, 'ide'):
+                self.ide.pm = self._pm
+                self.ide._refresh_explorer()
 
     def _browse_models_dir(self):
         d = filedialog.askdirectory(initialdir=self._models_dir_var.get())
@@ -843,6 +862,8 @@ class MiniAIApp(tk.Tk):
         self._append_system(label)
 
     def on_close(self):
+        if hasattr(self, 'ide'):
+            self.ide.close()
         if self._server_proc:
             try:
                 self._server_proc.terminate()
