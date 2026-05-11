@@ -19,6 +19,9 @@ A production-grade autonomous coding assistant designed with low-end models and 
 - **Premium RAG Integration**: Automatically switches between full-file injection and semantic snippet retrieval using embeddings for massive codebases.
 
 Anti-hallucination improvements: the agent now enriches prompts with retrieved workspace snippets and mandates source citations when using retrieved context. This significantly reduces fabricated facts during autonomous task execution (autopilot).
+- **System Behavior Guidelines**: Centralized `prompt.txt` with strict rules for path handling, task execution phases, and anti-hallucination measures.
+- **Command Memory (RAG)**: Remembers successful command patterns across sessions and suggests relevant commands based on context and directory similarity.
+- **Live Execution Visibility**: Real-time command execution display with streaming output, progress indicators, and transparent status reporting. Features output batching and `after_idle` scheduling for flicker-free updates during high-velocity output.
 - **Intelligent Communication Layer**: Centralized feedback logic that injects actionable hints for common command failures, drastically improving agent autonomy.
 - **Platform-Agnostic Interface**: Uses a `PlatformAdapter` to normalize filesystem and process operations across Windows, Linux, and macOS.
 - **Live Box Hybrid UI**: A modern terminal interface that blends sequential reasoning with boxed execution. Agent thoughts stream naturally in the terminal, while command outputs are isolated in a dedicated, live-updating panel for maximum focus.
@@ -46,6 +49,7 @@ Use `/help` inside the CLI to see the full list of available slash commands.
 - A configured LLM Backend (e.g., local Ollama, Groq, Anthropic, or OpenAI).
 
 ## Documentation
+- [System Prompt](prompt.txt) — Authoritative AI behavior guidelines for task execution and anti-hallucination.
 - [Tool Calling Guide](DOCS/TOOL_CALLING.md) — Understanding how the agent interacts with your system.
 - [Orchestrator Guide](DOCS/ORCHESTRATOR.md) — Mastering the Tri-Model orchestration pipeline.
 - [Sandbox Plan](sandbox_plan.md) — Roadmap for advanced, stateful command execution.

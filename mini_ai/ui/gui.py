@@ -105,6 +105,9 @@ class MiniAIApp(tk.Tk):
         self._workspace = Path.cwd()
         self._pm = PathManager(self._workspace)
         self._autopilot = False
+        # Command output batching for flicker-free updates
+        self._cmd_output_buffer: list[str] = []
+        self._cmd_output_pending = False
 
         _style_ttk(self)
         self._build_layout()
@@ -254,6 +257,39 @@ class MiniAIApp(tk.Tk):
                                        lmargin1=8, lmargin2=8)
         self._chat_text.tag_configure("thinking", foreground=FG3, font=("Segoe UI", 9, "italic"),
                                        lmargin1=8, lmargin2=8)
+
+        # ── Live Command Execution Panel ─────────────────────────────────────
+        self._cmd_panel = tk.Frame(frame, bg=BG2, height=200)
+        self._cmd_panel.pack(fill=tk.X, padx=0, pady=0)
+        self._cmd_panel.pack_propagate(False)
+        self._cmd_panel_visible = False
+
+        # Collapsible header
+        cmd_header = tk.Frame(self._cmd_panel, bg=BG2)
+        cmd_header.pack(fill=tk.X, padx=8, pady=(4, 0))
+
+        self._cmd_status_label = tk.Label(cmd_header, text="⚡ Command: Idle",
+                                           font=FONT_SMALL, bg=BG2, fg=FG2, anchor=tk.W)
+        self._cmd_status_label.pack(side=tk.LEFT)
+
+        self._cmd_time_label = tk.Label(cmd_header, text="", font=FONT_SMALL, bg=BG2, fg=FG3)
+        self._cmd_time_label.pack(side=tk.RIGHT)
+
+        # Command output area
+        self._cmd_output_text = scrolledtext.ScrolledText(
+            self._cmd_panel, bg=BG, fg=FG, font=FONT_MONO,
+            wrap=tk.WORD, relief="flat", padx=8, pady=4,
+            height=8, state=tk.DISABLED
+        )
+        self._cmd_output_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 4))
+
+        # Hide by default
+        self._cmd_panel.pack_forget()
+
+        # Progress indicator label (shown during operations)
+        self._progress_label = tk.Label(frame, text="", font=FONT_SMALL,
+                                        bg=BG, fg=ACCENT, anchor=tk.W)
+        self._progress_label.pack(fill=tk.X, padx=12, pady=(2, 0))
 
         # Separator
         sep = tk.Frame(frame, bg=BORDER, height=1)
@@ -649,6 +685,7 @@ class MiniAIApp(tk.Tk):
         self._progress.pack(fill=tk.X, padx=0, pady=0, before=self._tab_chat.winfo_children()[-1])
         self._progress.start(12)
         self._set_status("Thinking...", warn=True)
+        self._set_progress_label("Thinking...")
 
         # Start AI label placeholder
         self._append_ai_start()
@@ -664,6 +701,9 @@ class MiniAIApp(tk.Tk):
                 persistent_context=self._memory.context_for(goal) if self._memory else "",
                 memory=self._memory,
                 on_token=self._on_token_cb,
+                on_command_start=self._on_command_start_cb,
+                on_command_output=self._on_command_output_cb,
+                on_command_end=self._on_command_end_cb,
             )
             if self._memory:
                 self._memory.add_event(f"Task: {goal}\nResult: {result[:300]}")
@@ -677,6 +717,19 @@ class MiniAIApp(tk.Tk):
         if self._busy:
             self._token_queue.put(token)
 
+    def _on_command_start_cb(self, cmd: str, cwd: str):
+        """Called from background thread when command starts — queue for UI."""
+        # Use a tuple to identify this as a command start event
+        self._token_queue.put(("cmd_start", cmd, cwd))
+
+    def _on_command_output_cb(self, text: str):
+        """Called from background thread with command output — queue for UI."""
+        self._token_queue.put(("cmd_output", text))
+
+    def _on_command_end_cb(self, exit_code: int):
+        """Called from background thread when command ends — queue for UI."""
+        self._token_queue.put(("cmd_end", exit_code))
+
     def _drain_tokens(self):
         """Drain token queue on UI thread — updates chat text live."""
         try:
@@ -685,7 +738,22 @@ class MiniAIApp(tk.Tk):
                 if token is None:
                     # Done
                     self._on_generation_done()
+                elif isinstance(token, tuple):
+                    # Command event (cmd_start, cmd_output, cmd_end)
+                    event_type = token[0]
+                    if event_type == "cmd_start":
+                        _, cmd, cwd = token
+                        self._show_cmd_panel(cmd, cwd)
+                        self._set_progress_label(f"Running: {cmd[:40]}{'...' if len(cmd) > 40 else ''}")
+                    elif event_type == "cmd_output":
+                        _, text = token
+                        self._append_cmd_output(text)
+                    elif event_type == "cmd_end":
+                        _, exit_code = token
+                        self._hide_cmd_panel(exit_code)
+                        self._set_progress_label("")
                 else:
+                    # Regular token
                     self._append_token(token)
         except queue.Empty:
             pass
@@ -698,6 +766,8 @@ class MiniAIApp(tk.Tk):
         self._progress.stop()
         self._progress.pack_forget()
         self._set_status("Ready", ok=True)
+        self._set_progress_label("")
+        self._hide_cmd_panel()
         # Finalize AI message
         self._chat_text.configure(state=tk.NORMAL)
         self._chat_text.insert(tk.END, "\n")
@@ -749,6 +819,82 @@ class MiniAIApp(tk.Tk):
         self._chat_text.configure(state=tk.DISABLED)
         self._chat_history.clear()
         self._append_system("Chat cleared.")
+
+    # ── Live Command Panel Helpers ───────────────────────────────────────────
+
+    def _show_cmd_panel(self, command: str = "", cwd: str = ""):
+        """Show the live command execution panel."""
+        self._cmd_panel_visible = True
+        # Use idle scheduling to prevent layout thrashing
+        self.after_idle(lambda: self._cmd_panel.pack(
+            fill=tk.X, padx=0, pady=(4, 0),
+            before=self._progress_label.master.winfo_children()[2] if len(self._progress_label.master.winfo_children()) > 2 else None
+        ))
+        # Batch clear and initial content
+        self._cmd_output_buffer = []
+        self._cmd_output_pending = False
+        self._cmd_output_text.configure(state=tk.NORMAL)
+        self._cmd_output_text.delete("1.0", tk.END)
+        if command:
+            self._cmd_output_text.insert(tk.END, f"$ {command}\n")
+            if cwd:
+                self._cmd_output_text.insert(tk.END, f"[cwd] {cwd}\n\n")
+        self._cmd_output_text.configure(state=tk.DISABLED)
+        self._cmd_status_label.configure(text=f"⚡ Running: {command[:50]}{'...' if len(command) > 50 else ''}", fg=ACCENT)
+        self._cmd_start_time = time.time()
+        self._update_cmd_time()
+
+    def _hide_cmd_panel(self, exit_code: int = 0):
+        """Hide the live command execution panel."""
+        self._cmd_panel_visible = False
+        # Flush any pending output before hiding
+        self._flush_cmd_output()
+        self._cmd_panel.pack_forget()
+        self._cmd_status_label.configure(text="⚡ Command: Idle", fg=FG2)
+        self._cmd_time_label.configure(text=f"Exit code: {exit_code}")
+
+    def _append_cmd_output(self, text: str):
+        """Append output to the command panel with batching to prevent flicker."""
+        self._cmd_output_buffer.append(text)
+        if not self._cmd_output_pending:
+            self._cmd_output_pending = True
+            # Batch updates at 50ms intervals for smoother rendering
+            self.after(50, self._flush_cmd_output)
+
+    def _flush_cmd_output(self):
+        """Flush batched command output to the text widget."""
+        if not self._cmd_output_buffer:
+            self._cmd_output_pending = False
+            return
+
+        # Concatenate all pending text
+        combined = "".join(self._cmd_output_buffer)
+        self._cmd_output_buffer = []
+        self._cmd_output_pending = False
+
+        # Single configure/insert/see/configure cycle for efficiency
+        self._cmd_output_text.configure(state=tk.NORMAL)
+        self._cmd_output_text.insert(tk.END, combined)
+        # Limit scrollback to prevent memory bloat (keep last 5000 chars)
+        content = self._cmd_output_text.get("1.0", tk.END)
+        if len(content) > 10000:
+            self._cmd_output_text.delete("1.0", f"1.0 + {len(content) - 5000}c")
+        self._cmd_output_text.see(tk.END)
+        self._cmd_output_text.configure(state=tk.DISABLED)
+
+    def _update_cmd_time(self):
+        """Update elapsed time display for running command."""
+        if self._cmd_panel_visible and hasattr(self, '_cmd_start_time'):
+            elapsed = time.time() - self._cmd_start_time
+            self._cmd_time_label.configure(text=f"{elapsed:.1f}s")
+            self.after(500, self._update_cmd_time)
+
+    def _set_progress_label(self, text: str):
+        """Set the progress indicator label (thinking, reading, running)."""
+        if text:
+            self._progress_label.configure(text=f"⏳ {text}")
+        else:
+            self._progress_label.configure(text="")
 
     # ── Status bar ────────────────────────────────────────────────────────────
 

@@ -77,6 +77,17 @@ def stop_requested() -> bool:
 _BASE_SYSTEM = """You are Mini AI v39, a production-grade autonomous coding assistant.
 You solve user goals by interacting with the filesystem and running commands."""
 
+def _load_system_prompt() -> str:
+    """Load the system behavior guidelines from prompt.txt if it exists."""
+    try:
+        # Look for prompt.txt in project root (parent of mini_ai)
+        prompt_path = Path(__file__).parent.parent.parent / "prompt.txt"
+        if prompt_path.exists():
+            return f"\n\n### SYSTEM BEHAVIOR GUIDELINES:\n{prompt_path.read_text(encoding='utf-8')}\n"
+    except Exception:
+        pass
+    return ""
+
 _RULES = """### RULES:
 1. One action per turn. Use JSON.
 2. DO NOT explain what you are going to do. DO IT IMMEDIATELY.
@@ -138,7 +149,7 @@ def _build_system_prompt(intent: str, role: str = "agent", capabilities: dict = 
         base_system = "You are the Filesystem Agent. Manage files and directories. NO SHELL COMMANDS."
         tools_to_include = ["read_files", "list_dir", "filesystem_create_file", "filesystem_create_directory", "answer"]
     else:
-        base_system = _BASE_SYSTEM
+        base_system = _BASE_SYSTEM + _load_system_prompt()
         tools_to_include = ["read_files", "list_dir", "answer"]
         
         if intent in ("EXPLORE", "QUERY", "COMPLEX", "TASK"):
@@ -395,6 +406,9 @@ def agent_mode(
     observations: Optional[list[str]] = None,
     intent: str = "EXPLORE",
     initial_target: Optional[Path] = None,
+    on_command_start=None,  # callable(cmd, cwd) for GUI visibility
+    on_command_output=None,  # callable(text) for streaming output
+    on_command_end=None,  # callable(exit_code) when command finishes
 ) -> str:
     """Main agent loop. Runs until answer or max steps."""
     class ThoughtStreamingHandler:
@@ -476,7 +490,10 @@ def agent_mode(
     if initial_target:
         pm.set_target(initial_target)
     writer = SafeFileWriter(pm)
-    executor = ToolExecutor(config, pm, writer)
+    executor = ToolExecutor(config, pm, writer,
+                            on_command_start=on_command_start,
+                            on_command_output=on_command_output,
+                            on_command_end=on_command_end)
     # Register current executor so external callers can request immediate cleanup
     global _current_executor
     _current_executor = executor
@@ -605,6 +622,17 @@ def agent_mode(
                                 active_system = (active_system or "") + "\nCRITICAL: Use retrieved context and ALWAYS cite source file paths in responses. If unsure, say 'I don't know'. Do not hallucinate facts."
             except Exception:
                 # Fail-safe: do not interrupt agent if RAG enrichment fails
+                pass
+
+            # --- Command Memory: retrieve successful command patterns for this context ---
+            try:
+                if executor and hasattr(executor, 'get_command_hints_for_prompt'):
+                    command_hints = executor.get_command_hints_for_prompt(goal)
+                    if command_hints:
+                        # Append command hints to system prompt
+                        active_system = (active_system or "") + "\n\n" + command_hints
+            except Exception:
+                # Fail-safe: command memory is optional
                 pass
 
             # Log to chat history

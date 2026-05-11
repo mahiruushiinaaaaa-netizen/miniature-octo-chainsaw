@@ -1,4 +1,12 @@
 #### Done
+- **System Improvement Prompt**: Created `prompt.txt` with comprehensive guidelines to fix hallucinations and improve task execution:
+  - Path handling rules (always use absolute paths, verify before use)
+  - Task execution protocol (4 phases: Understanding, Planning, Execution, Verification)
+  - UI visibility requirements (live command execution display, progress indicators)
+  - Anti-hallucination measures (source verification, tool call discipline)
+  - Structured response format with code citations
+  - Error handling protocols
+  - Workflow enforcement (read before edit, confirm before command)
   - **executor.py**: Auto-installs yt-dlp for music search when `assume_yes=True` (already implemented)
   - **audio_player.py**: Auto-installs python-vlc when audio playback starts (lines 23-38)
   - **music_player.py**: Auto-installs pygame for GUI music player when imported (lines 17-28)
@@ -58,9 +66,39 @@
 - **Fixed Conversation Memory**: Resolved a bug where recent events were missing from AI context.
 
 #### Next
-- **Refine Terminal Box Layout**: Ensure the dynamic box remains "locked" during execution and doesn't flicker during high-velocity updates.
-- **RAG for Command Persistence**: Integrate the RAG system to help the agent remember past successful command patterns.
 - **Workspace Explorer Sidebar**: Port the sidebar concept to a toggleable panel rather than a fixed dual-pane.
+
+#### Done (Latest)
+- **RAG for Command Persistence**: Implemented command memory system to help agent remember successful patterns:
+  - Created `command_memory.py` with `CommandMemory` class for storing/retrieving command patterns
+  - Records command, cwd, exit code, timestamp, and context for each execution
+  - Retrieves relevant patterns based on query similarity and directory matching
+  - Integrates with `ToolExecutor` to record all command executions automatically
+  - Enriches agent system prompt with successful command hints via `get_command_hints_for_prompt()`
+  - Prunes old patterns (keeps 100 successful, 50 failed) to manage memory
+  - Stores in `.mini_ai/command_memory.json` for persistence across sessions
+- **Refined Terminal Box Layout**: Prevented flickering during high-velocity command output:
+  - Added output batching system (`_cmd_output_buffer`, `_cmd_output_pending`)
+  - 50ms batch intervals for smoother rendering via `_flush_cmd_output()`
+  - `after_idle` scheduling to prevent layout thrashing when showing panel
+  - Scrollback limiting (5000 chars) to prevent memory bloat
+  - Single configure/insert/see/configure cycle for efficiency
+- **Wired GUI Command Panel to Agent**: Full integration of live command execution:
+  - `executor.py`: Added callback parameters (`on_command_start`, `on_command_output`, `on_command_end`) to `ToolExecutor`
+  - `agent.py`: Added callback parameters to `agent_mode()` and pass them to `ToolExecutor`
+  - `gui.py`: Implemented `_on_command_start_cb`, `_on_command_output_cb`, `_on_command_end_cb` that queue events
+  - Updated `_drain_tokens()` to handle command events and update the live command panel
+  - Commands now show live in the GUI with streaming output and exit codes
+- **Integrated Prompt into Agent**: Modified `agent.py` to load and inject `prompt.txt` into system prompts via `_load_system_prompt()` function
+- **Live Command Terminal in GUI**: Enhanced `gui.py` with collapsible command execution panel (`_cmd_panel`) showing:
+  - Real-time command status with elapsed time
+  - Live output streaming in scrollable text area
+  - Show/hide helpers (`_show_cmd_panel`, `_hide_cmd_panel`, `_append_cmd_output`)
+- **Progress Indicator System**: Added `_progress_label` to chat tab showing "Thinking...", "Reading..." status during operations
+- **Path Verification Integration**: Enhanced `path_manager.py` with:
+  - `verify_path_exists()` - verifies paths and suggests alternatives
+  - `suggest_path_correction()` - generates helpful messages with directory listings
+  - Updated `executor.py` `tool_read_files` to use new verification for better error messages
 
 #### Done
 - **RAG Grounding & Anti-Hallucination**: Integrated prompt grounding inside `agent_mode` using the `RAGManager`. Agent now retrieves relevant workspace snippets before generation, enriches prompts, and requires file-path citations when using retrieved context. This reduces hallucination and improves factual correctness.
@@ -68,13 +106,22 @@
 - **Citation Heuristics**: Added `_heuristic_citation_check()` to detect file-path citations in agent output. Planner now tags tasks requiring citations with "requires_citation" tag.
 - **RAG Graceful Fallback**: Fixed HTTP 501 handling in `backend.get_embeddings()` to silently return empty vectors when embeddings aren't supported, allowing agent to continue without RAG-enhanced context. Updated `rag.py` to not log warnings for expected failures.
 
-#### Next (updated)
-- Run full test suite and observe any regressions in agent behavior.
-- Consider adding automated unit tests for RAG-enriched prompt flows.
-
 #### Notes
 - **User Preference**: The user explicitly requested moving away from the dual-pane split to a more "Codex-style" interaction where thinking is sequential but execution is boxed.
 - **Windows Stability**: Internal fallbacks for common shell commands (mkdir, touch) are much more reliable than trying to prompt the model to learn Windows syntax perfectly.
+- **System Prompt**: `prompt.txt` contains authoritative behavior guidelines for the AI to prevent hallucinations and improve task execution. Now loaded into agent system prompts via `_load_system_prompt()`.
+- **GUI Command Panel**: New live command execution panel in chat tab fully wired to agent:
+  - `ToolExecutor` accepts callbacks: `on_command_start(cmd, cwd)`, `on_command_output(text)`, `on_command_end(exit_code)`
+  - `agent_mode()` forwards callbacks from GUI to executor
+  - GUI uses thread-safe queue to stream command output to UI in real-time
+  - Panel shows command, working directory, elapsed time, and streaming output
+  - **Flicker-free updates**: 50ms output batching, `after_idle` scheduling, scrollback limiting
+- **Command Memory**: `command_memory.py` provides RAG-style command persistence:
+  - Records all commands with cwd, exit code, timestamp, context
+  - Retrieves relevant patterns based on query similarity and directory match
+  - Enriches agent prompts with successful command hints
+  - Stores in `.mini_ai/command_memory.json`, prunes old patterns (100 successful, 50 failed)
+- **Path Verification**: `path_manager.py` now includes `verify_path_exists()` and `suggest_path_correction()` to detect hallucinated paths and suggest alternatives with directory listings.
 - **CopixTUI Usage**:
   ```python
   from mini_ai.ui import CopixTUI

@@ -329,3 +329,74 @@ class PathManager:
 
     def _log_target_set(self, raw: str, resolved: Path) -> None:
         print(f"[TARGET DIRECTORY] Detected from goal: '{raw}' -> {resolved}", flush=True)
+
+    def verify_path_exists(self, path_text: str) -> tuple[bool, Path, list[str]]:
+        """
+        Verify a path exists and provide feedback.
+
+        Returns:
+            (exists: bool, resolved_path: Path, suggestions: list[str])
+            suggestions contains alternative paths if the path doesn't exist
+        """
+        resolved = self.resolve_target(path_text)
+
+        if resolved.exists():
+            return True, resolved, []
+
+        # Path doesn't exist - try to find similar paths
+        suggestions = []
+        parent = resolved.parent
+
+        if parent.exists():
+            # Look for similar filenames in the parent directory
+            target_name = resolved.name.lower()
+            try:
+                for item in parent.iterdir():
+                    if item.name.lower() == target_name:
+                        # Case mismatch
+                        suggestions.append(f"Did you mean: {item}? (case mismatch)")
+                        break
+                    if target_name in item.name.lower() or item.name.lower() in target_name:
+                        suggestions.append(f"Did you mean: {item}?")
+            except (OSError, PermissionError):
+                pass
+
+        # Check if workspace has similar files
+        if not suggestions and not resolved.is_absolute():
+            try:
+                for item in self._workspace.rglob(f"*{resolved.name}*"):
+                    if item.is_file():
+                        suggestions.append(f"Found similar in workspace: {item}")
+                        if len(suggestions) >= 3:
+                            break
+            except (OSError, PermissionError):
+                pass
+
+        return False, resolved, suggestions
+
+    def suggest_path_correction(self, failed_path: str) -> str:
+        """Generate a helpful message when a path doesn't exist."""
+        exists, resolved, suggestions = self.verify_path_exists(failed_path)
+
+        if exists:
+            return f"Path verified: {resolved}"
+
+        msg = f"Path NOT FOUND: {failed_path} (resolved to: {resolved})"
+
+        if suggestions:
+            msg += "\n\nSuggestions:\n" + "\n".join(f"  • {s}" for s in suggestions[:3])
+
+        # List parent directory contents if parent exists
+        parent = resolved.parent
+        if parent.exists():
+            try:
+                items = list(parent.iterdir())[:10]  # Limit to first 10
+                if items:
+                    msg += f"\n\nContents of {parent}:\n"
+                    for item in items:
+                        prefix = "📁 " if item.is_dir() else "📄 "
+                        msg += f"  {prefix}{item.name}\n"
+            except (OSError, PermissionError):
+                pass
+
+        return msg

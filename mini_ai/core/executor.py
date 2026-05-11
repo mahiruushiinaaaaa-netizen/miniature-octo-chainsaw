@@ -46,7 +46,7 @@ from .errors import ExecutionError, ErrorContext
 from .environment_inspector import inspect_environment
 from .sandbox.security import CommandRiskScorer
 from .rag import RAGManager
-
+from .command_memory import CommandMemory
 
 @dataclass
 class ExecutionContext:
@@ -80,7 +80,7 @@ _SAFE_RETRY_TOOLS = {
 }
 
 class ToolExecutor:
-    def __init__(self, config: Config, pm: PathManager, writer: SafeFileWriter):
+    def __init__(self, config: Config, pm: PathManager, writer: SafeFileWriter, on_command_start=None, on_command_output=None, on_command_end=None):
         self.config = config
         self.pm = pm
         self.writer = writer
@@ -91,10 +91,17 @@ class ToolExecutor:
         self.adapter = get_platform_adapter()
         self.context = ExecutionContext(cwd=pm.effective_root)
         self.context.capabilities = inspect_environment()
-        
+        # Callbacks for GUI visibility (optional)
+        self._on_command_start = on_command_start  # callable(cmd, cwd)
+        self._on_command_output = on_command_output  # callable(text)
+        self._on_command_end = on_command_end  # callable(exit_code)
+
         # Initialize Sandbox
         self.sandbox = self._init_sandbox()
-        
+
+        # Initialize Command Memory for RAG-based command persistence
+        self.cmd_memory = CommandMemory(config)
+
         # Tool Registry
         self.registry: Dict[str, Callable] = {
             "filesystem_create_file": self.tool_filesystem_create_file,
@@ -331,15 +338,23 @@ class ToolExecutor:
     def tool_read_files(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
         files_raw = action.get("files", [])
         files = [str(f) for f in files_raw] if isinstance(files_raw, list) else [str(files_raw)]
-        
+
         chunks = []
         read_paths = []
         failed_paths = []
-        
+
         for f in files:
-            path = self.pm.resolve_target(f)
-            if not path.exists():
-                failed_paths.append(f"{f} (not found)")
+            # Use new path verification for better error messages
+            exists, path, suggestions = self.pm.verify_path_exists(f)
+            if not exists:
+                error_msg = f"{f} (not found)"
+                if suggestions:
+                    error_msg += f" - Suggestions: {', '.join(suggestions[:2])}"
+                # Also show parent directory contents for debugging
+                parent_hint = self.pm.suggest_path_correction(f)
+                if parent_hint and "Contents of" in parent_hint:
+                    error_msg += f"\n{parent_hint.split('Contents of')[1].split('---')[0] if 'Contents of' in parent_hint else ''}"
+                failed_paths.append(error_msg)
                 continue
             try:
                 from ..tools.file_ops import is_probably_text
@@ -479,17 +494,30 @@ class ToolExecutor:
                 return False, self.result(False, "User cancelled command")
 
         try:
-            # Use LiveTerminalBox for focused, live-updating output
-            from ..ui import LiveTerminalBox
-            with LiveTerminalBox(cmd) as box:
-                res = self.sandbox.execute(cmd, timeout=600, on_output=box.append)
-            
+            # Notify GUI that command is starting
+            if self._on_command_start:
+                self._on_command_start(cmd, str(cwd))
+
+            # Use GUI callbacks if available, otherwise use LiveTerminalBox
+            if self._on_command_output:
+                # GUI mode: stream output via callback
+                res = self.sandbox.execute(cmd, timeout=600, on_output=self._on_command_output)
+            else:
+                # Terminal mode: use LiveTerminalBox
+                from ..ui import LiveTerminalBox
+                with LiveTerminalBox(cmd) as box:
+                    res = self.sandbox.execute(cmd, timeout=600, on_output=box.append)
+
             return_code = res.exit_code
             stdout = res.stdout
             stderr = res.stderr
 
             output = stdout + ("\n" + stderr if stderr else "")
-            
+
+            # Notify GUI that command ended
+            if self._on_command_end:
+                self._on_command_end(return_code)
+
             if return_code == 0:
                 # Update persistent CWD if it was a cd command (supporting optional /d flag)
                 import re
@@ -511,9 +539,30 @@ class ToolExecutor:
                     except Exception:
                         pass
 
+            # Record command to memory for future RAG retrieval
+            try:
+                self.cmd_memory.record(
+                    command=cmd,
+                    cwd=str(cwd),
+                    exit_code=return_code,
+                    context={"files": [], "description": f"Command executed in session"}
+                )
+            except Exception as mem_err:
+                logger.debug(f"Failed to record command to memory: {mem_err}")
+
             return False, self.result(return_code == 0, output, exit_code=return_code, stdout=stdout, stderr=stderr)
 
         except Exception as e:
+            # Record failed command to memory
+            try:
+                self.cmd_memory.record(
+                    command=cmd,
+                    cwd=str(cwd),
+                    exit_code=-1,
+                    context={"files": [], "description": f"Command failed: {str(e)}"}
+                )
+            except Exception:
+                pass
             return False, self.result(False, str(e))
 
     def tool_workspace_index(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
@@ -1468,5 +1517,14 @@ class ToolExecutor:
         lms_deno = user_home / ".lmstudio" / ".internal" / "utils" / "deno.exe"
         if lms_deno.exists():
             return str(lms_deno)
-            
+
         return None
+
+    def get_command_hints_for_prompt(self, query: str) -> str:
+        """Retrieve command hints to enrich the system prompt."""
+        patterns = self.cmd_memory.retrieve_relevant(query, str(self.context.cwd))
+        return self.cmd_memory.format_hints(patterns)
+
+    def get_command_memory_stats(self) -> dict[str, Any]:
+        """Get command memory statistics."""
+        return self.cmd_memory.get_stats()
