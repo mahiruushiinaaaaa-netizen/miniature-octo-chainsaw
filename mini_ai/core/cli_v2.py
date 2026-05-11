@@ -108,6 +108,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--allow-run", "--auto-run", action="store_true", help="Allow command execution")
     p.add_argument("--agent-tokens", type=int, default=1024, help="Max agent tokens")
     p.add_argument("--low-end", action="store_true", help="Force low-end mode optimizations")
+    p.add_argument("--copix", action="store_true", help="Use CopixTUI (Copilot/Codex-style interface)")
     
     # Logging
     p.add_argument("--verbose", action="store_true", help="Verbose output")
@@ -342,19 +343,28 @@ def build_config_v2(args: argparse.Namespace) -> Optional[AppConfig]:
     return config
 
 
-def repl(config: AppConfig) -> None:
-    """Interactive REPL using prompt_toolkit for a premium experience."""
-    header("Mini AI", f"Workspace: {config.workspace}")
-    ok(f"Model: {config.agent_model.model_path.name if config.agent_model.model_path else 'none'}")
-    if getattr(config, "tri_model", False):
-        if config.analyzer_model:
-            ok(f"Analyzer model: {config.analyzer_model.model_path.name if config.analyzer_model.model_path else 'none'}")
-        if config.coder_model:
-            ok(f"Coder model: {config.coder_model.model_path.name if config.coder_model.model_path else 'none'}")
-    elif config.ui_model:
-        ok(f"UI model: {config.ui_model.model_path.name if config.ui_model.model_path else 'none'}")
-    help_hint()
-    print("")
+def repl(config: AppConfig, use_copix: bool = False) -> None:
+    """Interactive REPL using prompt_toolkit or CopixTUI for a premium experience."""
+    
+    # Enable CopixTUI if requested
+    if use_copix:
+        from ..ui import CopixTUI
+        model_name = config.agent_model.model_path.name if config.agent_model.model_path else "Mini AI"
+        copix = CopixTUI(model_name=model_name)
+        copix.render()  # Render initial header
+    else:
+        # Old UI header
+        header("Mini AI", f"Workspace: {config.workspace}")
+        ok(f"Model: {config.agent_model.model_path.name if config.agent_model.model_path else 'none'}")
+        if getattr(config, "tri_model", False):
+            if config.analyzer_model:
+                ok(f"Analyzer model: {config.analyzer_model.model_path.name if config.analyzer_model.model_path else 'none'}")
+            if config.coder_model:
+                ok(f"Coder model: {config.coder_model.model_path.name if config.coder_model.model_path else 'none'}")
+        elif config.ui_model:
+            ok(f"UI model: {config.ui_model.model_path.name if config.ui_model.model_path else 'none'}")
+        help_hint()
+        print("")
     
     legacy_config = Config.from_app_config(config, config.agent_model, role="agent")
     if getattr(config, "tri_model", False):
@@ -366,6 +376,9 @@ def repl(config: AppConfig) -> None:
             legacy_config.coder_config = Config.from_app_config(config, config.coder_model, role="coder")
     elif config.ui_model:
         legacy_config.ui_config = Config.from_app_config(config, config.ui_model, role="ui")
+    
+    # Enable CopixTUI if requested
+    legacy_config.use_copix = use_copix
     
     router = CommandRouter(legacy_config)
 
@@ -386,9 +399,15 @@ def repl(config: AppConfig) -> None:
     except ImportError:
         HAS_PTK = False
 
+    # Use CopixTUI for input if enabled
+    use_copix_input = getattr(router, 'copix', None) is not None
+    
     while True:
         try:
-            if session:
+            if use_copix_input:
+                # Use CopixTUI elegant prompt
+                command = router.copix.get_input()
+            elif session:
                 command = session.prompt("you › ").strip()
             else:
                 command = input("you › ").strip()
@@ -432,7 +451,12 @@ def main() -> int:
     args = parse_args()
     
     # Configure logging
-    log_level = LogLevel.DEBUG if args.debug else (LogLevel.INFO if args.verbose else LogLevel.WARN)
+    # When using CopixTUI, force WARN level to prevent UI overlap
+    use_copix = getattr(args, 'copix', False)
+    if use_copix and not args.debug and not args.verbose:
+        log_level = LogLevel.WARN  # Suppress INFO logs for clean UI
+    else:
+        log_level = LogLevel.DEBUG if args.debug else (LogLevel.INFO if args.verbose else LogLevel.WARN)
     from .logger import configure_logging
     configure_logging(level=log_level, json_output=args.json_log)
     
@@ -482,6 +506,10 @@ def main() -> int:
     server_proc = None
     ui_proc = None
     coder_proc = None
+    
+    # Store metrics config locally for safe access in finally block
+    _metrics_export = getattr(args, 'metrics_export', None)
+    _metrics_format = getattr(args, 'metrics_format', 'json')
     
     try:
         if not server_ready(config.agent_model.base_url):
@@ -533,12 +561,23 @@ def main() -> int:
                 if not ui_proc:
                     logger.warn("UI model failed to start. Falling back to agent model.")
                     config.ui_model = None
+    except Exception as e:
+        logger.error(f"Server startup error: {e}")
+        if not args.allow_run:
+            return 1
+        logger.warn("Proceeding despite server startup error (--allow-run)")
         
-        # Main loop
+    # Main loop
+    try:
         if config.agent_model.model_path:
             ok(f"Agent model: {config.agent_model.model_path.name}")
         else:
             err("No agent model loaded. LLM features disabled.")
+            
+        # Sandbox status
+        sb_type = config.sandbox_type.upper()
+        ok(f"Sandbox: {sb_type} (Isolation: {'Active' if sb_type != 'LOCAL' else 'Host-Level'})")
+
         if getattr(config, "tri_model", False):
             if config.analyzer_model:
                 ok(f"Analyzer model: {config.analyzer_model.model_path.name if config.analyzer_model.model_path else 'none'}")
@@ -547,9 +586,8 @@ def main() -> int:
         elif config.ui_model:
             ok(f"UI model: {config.ui_model.model_path.name if config.ui_model.model_path else 'none'}")
         
-        repl(config)
+        repl(config, use_copix=use_copix)
         return 0
-        
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         return 0
@@ -563,12 +601,12 @@ def main() -> int:
             if proc and proc.poll() is None:
                 proc.terminate()
         
-        # Export metrics if requested
-        if args.metrics_export:
+        # Export metrics if requested (uses local variables set before try block)
+        if _metrics_export:
             metrics = get_metrics_collector()
-            export_path = Path(args.metrics_export).expanduser()
+            export_path = Path(_metrics_export).expanduser()
             try:
-                if args.metrics_format == "prometheus":
+                if _metrics_format == "prometheus":
                     content = metrics.export_prometheus()
                     export_path.write_text(content, encoding="utf-8")
                 else:

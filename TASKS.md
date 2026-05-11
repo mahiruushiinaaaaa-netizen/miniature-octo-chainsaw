@@ -1,104 +1,96 @@
 #### Done
-- Implemented Dynamic Model Routing: When starting the CLI with `--dual-model`, the `CommandRouter` now dynamically routes "talking" and "analyzing" intents (`CONVO`, `QUERY`) to the secondary fast UI model, while reserving the primary, larger model strictly for "coding" and complex tasks (`EDIT`, `EXPLORE`, `COMPLEX`).
-- Fixed a bug where the agent would instantly fail the task if the model generated empty content. Empty generations now trigger a retry (up to 3 times) with a strict nudge.
-- Hardened `parse_action` heuristics to catch and reject even more system prompt echoing (e.g., "goal: solve user goals", "user goal:", "history:") which were mistakenly being treated as final text answers.
-- Implemented Dynamic Context Sizing based on the configured model's context window (`config.ctx`). This avoids hardcoded limits and prevents HTTP 400 errors for low-end models.
-- Implemented SEARCH/REPLACE Block Self-Healing. When the AI fails to match a block, it now returns the actual file contents so that weak models can auto-correct themselves on the next turn.
-- Added a one-shot perfect example in the system prompt (`agent.py`) to drastically improve format adherence for low-end models like Llama-3 8B.
-- Verified that `generate_repo_map` in `repomap.py` is already using lightweight `ast` (Python) and `regex` (JS/TS) to build perfect signature maps without heavy `tree-sitter` dependencies!
-- Fixed `/add` (pinned files) context propagation. Pinned files are now properly injected into the `session_context` every turn instead of being transient memory events, with a dedicated 40% context limit allocation to prevent token blowout.
-- Upgraded the Interactive Terminal UI. `cli.py` now leverages `prompt_toolkit` (if installed) to provide auto-suggestions, multi-line input, and command history.
-- Consolidated audio playback to use VLC exclusively. Implemented automatic VLC discovery for Windows and hardened state detection to handle raw byte responses, preventing casting errors during playback initialization.
-- Upgraded `_summarize_history` to dynamically pack the observation history based on token character limits instead of arbitrarily truncating it after 8 turns.
-- Implemented the strict Linter Loop. If `_auto_lint_edits` finds an error, it injects a high-priority "SYSTEM MANDATE" into the observation queue, explicitly demanding the model fixes the code before finishing the task.
-- Implemented Dynamic Intent Routing. The CLI now heuristically categorizes tasks to automatically switch modes: simple greetings bypass context loading for ultra-fast replies, standard tasks use the fast agent, and massive requests automatically trigger the multi-agent Orchestrator.
-- Fixed a fatal `NameError: name 're' is not defined` bug in `proc.py` that occurred when stripping ANSI codes from successful shell command executions.
-- Hardened the `_RULES` system prompt to strictly forbid narration, drastically reducing wasted "thinking time" on invalid text generations.
-- Drafted the Tri-Model Architecture Integration Plan to define roles, communication protocols, and implementation steps for Agent, Analyzer, and Coder models.
-- Fully implemented the Tri-Model Architecture! Added CLI parser support for `--tri-model`, `--agent-model`, `--analyzer-model`, and `--coder-model`. Updated `config.py` to support `analyzer_config` and `coder_config`. 
-- Updated `orchestrator.py` to execute a collaborative Tri-Model pipeline where the Analyzer scopes the step and reviews the result, and the Coder executes it.
-- Upgraded `agent.py`'s `_build_system_prompt` to provide highly specialized prompts and restrict tool access based on the model's `role` ("analyzer" vs "coder" vs "agent").
-- Implemented role-based model auto-discovery. The CLI now automatically searches for models in `agent/`, `analyzer/`, and `coder/` subdirectories within your models folder when `--tri-model` is enabled, ensuring a zero-config multi-agent setup.
-- Fixed `floating_player.py` disappearing bug by adding missing `json` import and hardening the PID watch logic.
-- Fixed VLC initialization error in `audio_player.py` by removing unsupported flags and adding safety checks.
-- Fixed `floating_player.py` crash on start by correcting `btn_specs` unpacking from 3 to 4 values.
-- Fixed CLI intent matching where questions about media (e.g., "what music is playing") were incorrectly treated as direct play commands.
-- Implemented a `media_status` tool to allow the agent to correctly read current playback state from the floating player.
-- **Consolidated Modular Architecture**: Finalized the restructuring of the project into a professional package hierarchy (`mini_ai.core`, `mini_ai.agents`, `mini_ai.tools`, `mini_ai.ui`).
-- **Resolved Package Dependency Loops**: Fixed circular import issues between `core`, `agents`, and `tools` by standardizing relative imports and using direct submodule references.
-- **Verified Runtime Stability**: Confirmed that both the CLI (`run.py`) and GUI (`mini_ai_gui.py`) entry points correctly load and initialize the new modular system.
-- **Enhanced Media Player**: Implemented Autoplay (relevance-based), Queuing, and Next/Skip support in the floating player and background VLC process.
-- **Fixed NameError in Agent Mode**: Resolved a critical bug where `ToolExecutor` was undefined at runtime in `agent.py` due to being behind a `TYPE_CHECKING` block.
-- **Improved Logger Resilience**: Fixed a `UnicodeEncodeError` that crashed the agent on Windows terminals with non-UTF8 encodings (like CP1252) by adding an encoding fallback for special characters (✓, ⚠).
-- **Hardened Modular Imports**: Cleaned up relative imports and fixed incorrect `.core` references inside the `agents` package.
-- **Premium Green Theme for Floating Player**: Redesigned the floating music player's UI with a consistent green color palette (Mint, Forest, Emerald). Updated buttons, search bars, progress bars, and backgrounds to use green tints.
-- **Intelligent Media Enqueuing**: Updated the floating player's search logic to automatically enqueue new tracks if music is already playing, ensuring uninterrupted playback while building a queue.
-- **Tool Calling Education**: Created a specialized documentation guide in `DOCS/TOOL_CALLING.md` that explains tool calling and optimizes for **Qwen2.5 3B**.
-- **GBNF Grammar Optimization**: Implemented native GBNF grammar support to strictly enforce JSON tool calling. This makes small models like **Qwen2.5 3B** virtually bulletproof against syntax errors and drastically improves autonomous stability.
-- **Windows Path & Command Optimization**: Hardened the system for Windows environments by adding proactive error hints for unquoted paths and providing alternatives for non-native commands like `touch` in the system prompt.
-- **Phased Intelligence Implementation**: Integrated a mandatory "Plan -> Action" cycle into the base agent using GBNF grammars. Created `DOCS/ORCHESTRATOR.md` to guide users on using the high-intelligence Orchestrator Mode. Fixed code indentation in `agent.py` and improved `/orchestrate` CLI usability.
-- **Dynamic Workspace Management**: Added `/workspace` and `/cd` commands to the CLI. Implemented internal plumbing to allow the agent to start in a custom sub-directory while maintaining the global workspace root.
-- **Grammar-Level Tool Enforcement**: Updated GBNF grammars to strictly restrict the `action` field to known tools. This eliminates hallucinations where the model attempts to use shell commands as JSON actions.
-- **Robust Agent Orchestration**: Implemented `ExecutionContext` for stateful session management, `PlatformAdapter` for OS-agnostic operations, and `EnvironmentInspector` for automatic capability detection.
-- **Framework-Specific Laravel Tools**: Added `laravel_tools.py` and integrated them into the `ToolExecutor` registry.
-- **Persistent Session Management**: Enhanced `tool_run_cmd` to track and persist CWD changes across command calls.
-- **Structured Tool Registry**: Refactored `ToolExecutor` to use a centralized registry, enabling easier addition of specialized framework tools.
-- **Windows File Creation Fallback**: Added a robust regex-based fallback for Windows "touch" alternatives (`type nul >`, `echo. >`) in `tool_run_cmd`.
-- **Structured Observations**: Implemented `Observation` dataclass to capture rich tool feedback (stdout, stderr, success, exit_code).
-- **Dynamic System Prompts**: Agent is now aware of its system capabilities and specialized tools via dynamic prompt injection.
-- **Enhanced Task Resulting**: `proc.py` and `ToolExecutor` now return separated stdout/stderr for better reflection.
-- **TaskGraph Orchestration**: Refactored `planner.py` and `orchestrator.py` to support dependency-aware task execution.
-- **Intelligent Capability Routing**: Implemented heuristic routing to assign tasks to specialized Terminal, Coder, or Filesystem agents.
-- **Hardened Command Sandbox**: Strictly enforced command whitelists and blocked destructive patterns (`rm -rf`, etc.).
-- **Filesystem Safety**: Integrated mandatory write-path validation to protect the agent's core source code.
-- **Resilient Execution**: Added automated task retries (up to 2 attempts) to handle transient failures in the orchestration loop.
-- Created a comprehensive Sandbox Implementation Plan (`sandbox_plan.md`) to provide stateful, isolated command execution (Local, Venv, Docker).
-- Implemented the foundation of the Sandbox system:
-    - Created `mini_ai/core/sandbox/` package with `BaseSandbox` interface.
-    - Implemented `LocalSandbox` for restricted host execution.
-    - Implemented `VenvSandbox` for automatic Python virtual environment isolation.
-    - Integrated Sandbox into `ToolExecutor` and `Config`.
-- Implemented `PersistentShellSession`:
-    - Created `session.py` to manage long-running shell processes (cmd.exe/bash).
-    - Added sentinel-based command tracking for exit codes and CWD synchronization.
-    - Upgraded `LocalSandbox` to be fully stateful across tool calls.
-    - Enhanced robustness with unique session tokens to prevent output collisions.
-- Improved `agent.py` JSON parsing:
-    - Added a sliding-window brace matching algorithm to extract the first valid JSON object from talkative model outputs.
-    - Robustly handles cases where the model generates multiple JSON objects in a single turn.
-- Expanded Command Whitelist:
-    - Added `powershell`, `cmd`, `npx`, `yarn`, `bun`, and basic file utilities (`mkdir`, `rm`, `cat`, etc.) to allow the agent to perform more complex environment setups.
-- Premium Execution UI:
-    - Implemented `tool_result` component in `ui.py` for persistent, detailed execution log panels.
-    - Enhanced `agent.py` to show detailed tool parameters (commands, paths, URLs) in the ACTION panel for better transparency.
-- Robust Environment Inspection:
-    - Fixed binary detection on Windows by enabling `shell=True`, allowing correct identification of `.cmd` and `.bat` files like `npm` and `composer`.
-- Orchestration & Parsing Reliability:
-    - Added automatic JSON "self-healing" for Windows paths. Single backslashes in model outputs are now correctly escaped before parsing, preventing "hallucinated" task successes.
-    - Hardened the `orchestrator.py` task verification logic. Tasks no longer pass based on simple keyword checks; they now require explicit tool execution or a definitive "Final Answer" from the agent.
-- UX & Automation Improvements:
-    - Fixed `--allow-run` behavior: Now correctly initializes the agent in `safe` autopilot mode, enabling auto-approval of commands as expected.
-    - Enhanced `confirm` UI: Defaulted to "Yes" and added a clear `(Enter for Yes)` hint to improve workflow speed during manual checks.
-- Step-by-Step & Context-Aware Execution:
-    - Updated `planner.py` system prompt to favor breaking down goals into many small, atomic tasks.
-    - **Environment-Aware Planning**: Modified `orchestrator.py` and `planner.py` to pass current system capabilities (Node, npm, etc.) into the planning phase. The agent now skips redundant installation *and* verification tasks if the software is already detected.
-- **Real-Time Thought Streaming**: Fixed a bug in `orchestrator.py` where the `on_token` handler was not passed to the agent, now enabling live visibility into the agent's reasoning process during orchestration.
-- Updated `agent.py` system prompt with a strict rule (Rule #10) to avoid chained commands and perform operations one atomic step at a time.
-- **Repository Initialization & Push**: Created `.gitignore`, committed the modular codebase, and successfully pushed to the GitHub repository: `https://github.com/mahiruushiinaaaaa-netizen/miniature-octo-chainsaw`.
-- **Sandbox Security & Hardening**: Implemented `CommandRiskScorer` for heuristic command risk assessment, `ResourceMonitor` for process tracking, and integrated mandatory path validation. Updated `ToolExecutor` to enforce high-risk command approval.
-- **Environment Inspection Upgrade**: Added Docker detection to `environment_inspector.py` and improved binary versioning for Windows environments.
-- **Model Load Optimization**: Increased the global model server startup timeout and low-end mode request timeout to 120 seconds to accommodate slower hardware and larger models.
-- **Sandbox IDE Implementation**: Developed a full-featured Sandbox IDE component within the GUI, featuring a file explorer, integrated code editor, stateful terminal, and real-time resource monitor.
-- **Sandbox IDE Implementation**: Developed a full-featured Sandbox IDE component within the GUI, featuring a file explorer, integrated code editor, stateful terminal, and real-time resource monitor.
-- **GUI Integration**: Seamlessly integrated the Sandbox IDE into the `MiniAIApp` as a new primary navigation tab with automatic workspace and configuration synchronization.
-- **Startup Resilience**: Improved CLI robustness to allow the application to start even if the AI model fails to initialize or the backend server fails to start.
-- **Startup Resilience**: Improved CLI robustness to allow the application to start even if the AI model fails to initialize or the backend server fails to start.
-- **Optional Dependency Handling**: Made `psutil` an optional dependency in the sandbox security layer, preventing startup crashes when the library is missing.
+  - **executor.py**: Auto-installs yt-dlp for music search when `assume_yes=True` (already implemented)
+  - **audio_player.py**: Auto-installs python-vlc when audio playback starts (lines 23-38)
+  - **music_player.py**: Auto-installs pygame for GUI music player when imported (lines 17-28)
+  - **executor.py**: Enhanced _play_audio_file() to capture subprocess output and handle installation timeouts (lines 1197-1221)
+  - System now waits 2 seconds for auto-installs to complete before checking subprocess status
+  - All three dependency layers now handle missing packages gracefully
+- **Audio Player Debugging & Wait Time Fix**: Enhanced audio player subprocess handling and error capture. Changes:
+  - Increased wait time for auto-install from 2 seconds to 10 seconds (polling every 0.25s in a loop)
+  - Better error capture and reporting from audio_player subprocess stderr
+  - Added debug output to audio_player.py to show VLC module loading status
+  - Better handling of subprocess timeout exceptions (now kills the process properly)
+  - Now displays full error messages (up to 150 chars) to help diagnose issues
+  - Executor now reports exact errors from audio player startup failures
+  - Modified `tool_play_media()` in `executor.py` to detect ImportError for yt-dlp
+  - When `assume_yes=True` and yt-dlp is missing, runs `pip install -q yt-dlp` automatically
+  - Retries the music query after installation completes
+  - Added `sys` import for subprocess execution
+  - Users can now say "yes" to play music and yt-dlp will be installed automatically
+- **GUI Works Without Models**: Fixed the GUI to allow workspace directory changes even when no models are found. Changes:
+  - Modified `_load_config_bg()` in `gui.py` (line 527-540) to continue initialization instead of returning early when no model is found
+  - Set `_config = None` and initialized `_memory` even without a model, allowing the app to function in read-only mode
+  - Added system message: "No model loaded. You can still change workspace and configure settings."
+  - Modified `_browse_workspace()` to retry config loading after directory change (useful if new dir contains models)
+  - Users can now change directories and configure settings without a model loaded
+- **Agent Refusal Fix**: Fixed issue where agent would refuse to help by saying "I cannot access your PC" instead of using available tools. Changes:
+  - Added `_is_refusal()` check in `parse_action()` before treating text as answer (line 283-284 in agent.py)
+  - Expanded refusal patterns to catch: "i can't directly", "i cannot access", "unable to access", "i'm sorry, but i can't", etc.
+  - Added specific refusal nudge: "You refused to help... This is INCORRECT - you HAVE tools available"
+  - Added Rule 13: "NEVER REFUSE: You CAN access files, run commands, and perform any task"
+- **CopixTUI – Copilot/Codex-style Interface**: Created a new `copix_tui.py` module with a minimalist "tech-noir" aesthetic inspired by GitHub Copilot and OpenAI Codex. Now integrated into CLI:
+  - **Usage**: `py run.py --copix` to enable the new interface
+  - **Bug Fixes**:
+    - Fixed `name 'args' is not defined` error: `repl()` function (line 381) was referencing `args` from global scope - changed to use `use_copix` parameter
+    - Stored metrics config in local variables before try block (lines 510-512), updated finally block to use locals (lines 604-616)
+    - **Fixed logging suppression**: `configure_logging()` now updates ALL existing logger levels (line 287-289), `get_logger()` uses global `_default_level` instead of hardcoded INFO (line 265)
+  - Slim header with model name and ● LIVE indicator
+  - Elegant ❯ prompt symbol in Copilot blue (#58a6ff)
+  - Markdown rendering with automatic syntax highlighting (Python, JS, SQL, etc.)
+  - Subtle "Generating..." spinner with throttled updates
+  - Muted footer showing duration, tokens/sec, and content length
+  - Auto-dimming of previous messages (the "Dim Rule")
+  - Color palette: Microsoft Blue (#0078d4) and Copilot Purple (#a371f7)
+  - **Integration**: Added `--copix` flag to CLI, `CommandRouter` uses CopixTUI when enabled, `repl()` uses ❯ prompt
+- **Hybrid "Live Box" UI**: Replaced the rigid Dual-Pane split with a more natural sequential flow. Reasoning and planning now stream as standard terminal text, while active command execution is isolated in a dedicated, live-updating **Terminal Execution** box.
+- **Improved Thought Visibility**: Thoughts and plans now stream in real-time even in sequential mode, ensuring transparency during the planning phase.
+- **Refined Refusal Detection**: Fixed a bug where valid JSON actions containing words like "assist" or "help" were incorrectly flagged as refusals, causing premature agent termination.
+- **Dual-Pane Agent UI (Legacy)**: Implemented a professional split-screen interface using `rich.Layout`. (Note: Now optional/fallback to Live Box mode).
+- **Internal Windows `mkdir` Handler**: Intercepts `mkdir -p` and unquoted paths on Windows, using native Python `pathlib` for reliable directory creation.
+- **Intelligent Windows Hints**: Added actionable guidance for common shell errors (syntax, quoting) to help models self-correct.
+- **Fixed Real-time Thinking Display**: `update_agent_thoughts()` and `update_agent_terminal()` in `ui.py` were no-ops (line 345-347) - now they render THINKING and TERMINAL panels with rich/Markdown, plus buffer getters for CopixTUI integration
+- **Fixed Memory Loading Bug**: `memory.py` had incorrect import `from .core import get_logger` (line 23) inside the core package - changed to `from .logger import get_logger`, also fixed `logger.warning` → `logger.warn`
+- **Fixed cmd.exe Terminal Compatibility**: Added `_detect_terminal_capabilities()` in `copix_tui.py` to detect legacy Windows Command Prompt vs modern terminals (Windows Terminal, VS Code). For cmd.exe:
+  - Unicode symbols (❯, ●, ◉) fall back to ASCII (>, *, >)
+  - Rich Panels are replaced with simple text output (no box-drawing characters)
+  - Live spinners replaced with simple "Generating..." text
+  - Added `_Symbols` class for capability-aware symbol selection
+- **Fixed Conversation Memory**: Resolved a bug where recent events were missing from AI context.
 
 #### Next
-- Scaffold the React Native project in the Downloads folder as requested.
-- Conduct a full end-to-end stress test of the Laravel orchestration.
+- **Refine Terminal Box Layout**: Ensure the dynamic box remains "locked" during execution and doesn't flicker during high-velocity updates.
+- **RAG for Command Persistence**: Integrate the RAG system to help the agent remember past successful command patterns.
+- **Workspace Explorer Sidebar**: Port the sidebar concept to a toggleable panel rather than a fixed dual-pane.
+
+#### Done
+- **RAG Grounding & Anti-Hallucination**: Integrated prompt grounding inside `agent_mode` using the `RAGManager`. Agent now retrieves relevant workspace snippets before generation, enriches prompts, and requires file-path citations when using retrieved context. This reduces hallucination and improves factual correctness.
+- **Reviewer-based Task Verification**: Enhanced `orchestrator.py` tri-model flow to use `review_final_output()` with strict verification (confidence >= 0.6, zero issues). Tasks are re-attempted up to 2 times if review fails. Added `format_review()` display in orchestrator.
+- **Citation Heuristics**: Added `_heuristic_citation_check()` to detect file-path citations in agent output. Planner now tags tasks requiring citations with "requires_citation" tag.
+- **RAG Graceful Fallback**: Fixed HTTP 501 handling in `backend.get_embeddings()` to silently return empty vectors when embeddings aren't supported, allowing agent to continue without RAG-enhanced context. Updated `rag.py` to not log warnings for expected failures.
+
+#### Next (updated)
+- Run full test suite and observe any regressions in agent behavior.
+- Consider adding automated unit tests for RAG-enriched prompt flows.
 
 #### Notes
-- Low-end models heavily rely on self-healing; returning file snippets inside `executor.py` massively helps them recover without looping.
-- Circular imports were primarily caused by importing from package roots (`from . import ...`) inside submodules; using explicit module paths resolved this.
+- **User Preference**: The user explicitly requested moving away from the dual-pane split to a more "Codex-style" interaction where thinking is sequential but execution is boxed.
+- **Windows Stability**: Internal fallbacks for common shell commands (mkdir, touch) are much more reliable than trying to prompt the model to learn Windows syntax perfectly.
+- **CopixTUI Usage**:
+  ```python
+  from mini_ai.ui import CopixTUI
+  
+  copix = CopixTUI(model_name="Qwen 3")
+  
+  # Add user message
+  copix.add_message("user", "Write a fibonacci function")
+  copix.render()
+  
+  # Start generation
+  copix.start_generation("Thinking")
+  # ... stream tokens ...
+  copix.end_generation(response_text, {"duration_ms": 1250, "tokens_per_sec": 45.2})
+  copix.render()
+  
+  # Get user input with ❯ prompt
+  user_input = copix.get_input()
+  ```

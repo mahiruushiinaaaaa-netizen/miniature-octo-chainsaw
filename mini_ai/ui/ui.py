@@ -20,6 +20,7 @@ try:
     from rich.theme import Theme
     from rich.table import Table
     from rich.logging import RichHandler
+    from rich.text import Text
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -196,11 +197,15 @@ def tool_result(tool_name: str, output: str, success: bool = True) -> None:
     ))
 
 class MarkdownStream:
-    """Live streaming markdown renderer."""
-    def __init__(self):
+    """Live streaming markdown renderer with reduced flicker."""
+    def __init__(self, title: str = "THOUGHTS", border_style: str = C.purple):
         self.text = ""
+        self.title = title
+        self.border_style = border_style
         self.live = None
         self._live_started = False
+        self._last_update = 0
+        self._update_interval = 0.05  # Min 50ms between updates
 
     def update(self, chunk: str, final: bool = False):
         if not RICH_AVAILABLE:
@@ -208,12 +213,28 @@ class MarkdownStream:
             return
 
         self.text += chunk
+        
+        # Buffer updates to reduce flicker
+        import time
+        now = time.time()
+        should_update = final or (now - self._last_update > self._update_interval)
+        
         if not self._live_started:
-            self.live = Live(Markdown(self.text), console=console, refresh_per_second=10)
+            # Use a panel for streaming in sequential mode
+            self.live = Live(
+                Panel(Text(self.text), title=f"[bold {self.border_style}]{self.title}[/bold {self.border_style}]", border_style=self.border_style),
+                console=console, refresh_per_second=4, transient=False
+            )
             self.live.start()
             self._live_started = True
-        
-        self.live.update(Markdown(self.text))
+            self._last_update = now
+        elif should_update:
+            self.live.update(Panel(
+                Markdown(self.text) if final else Text(self.text),
+                title=f"[bold {self.border_style}]{self.title}[/bold {self.border_style}]",
+                border_style=self.border_style
+            ))
+            self._last_update = now
         
         if final:
             if self.live:
@@ -274,3 +295,103 @@ def clear_line() -> None:
         console.print("\r", end="")
     else:
         print("\r" + " " * (term_width() - 1) + "\r", end="", flush=True)
+
+# ─── Live Box UI (Agent Mode) ────────────────────────────────────────────────
+
+class LiveTerminalBox:
+    """A standalone live-updating panel for terminal command execution."""
+    def __init__(self, command: str):
+        self.command = command
+        self.output = ""
+        self.live = None
+        self._last_update = 0
+
+    def __enter__(self):
+        if not RICH_AVAILABLE: return self
+        self.live = Live(self._render(), console=console, refresh_per_second=4, transient=False)
+        self.live.start()
+        return self
+
+    def __exit__(self, *args):
+        if self.live:
+            # Final render with full content
+            self.live.update(self._render())
+            self.live.stop()
+
+    def append(self, text: str):
+        self.output += text
+        import time
+        now = time.time()
+        # Throttle UI updates to 10fps
+        if self.live and now - self._last_update > 0.1:
+            self.live.update(self._render())
+            self._last_update = now
+
+    def _render(self):
+        # Keep output window sane
+        display_output = self.output
+        if len(display_output) > 2000:
+            display_output = "... [truncated] ...\n" + display_output[-1800:]
+            
+        return Panel(
+            Text.from_ansi(display_output),
+            title=f"[bold {C.green}]TERMINAL EXECUTION[/bold {C.green}]",
+            subtitle=f"[dim]{self.command[:80]}[/dim]",
+            border_style=C.green
+        )
+
+# ─── Real-time thought/terminal display ────────────────────────────────────
+_thought_buffer: str = ""
+_terminal_buffer: str = ""
+
+def update_agent_thoughts(text: str) -> None:
+    """Display agent thinking/reasoning in real-time."""
+    global _thought_buffer
+    _thought_buffer = text
+    if RICH_AVAILABLE and text.strip():
+        # Render as a subtle panel - non-live to avoid conflicts with CopixTUI
+        console.print(Panel(
+            Markdown(text[:2000]),  # Limit length
+            title=f"[bold {C.purple}]THINKING[/bold {C.purple}]",
+            border_style=C.purple,
+            subtitle=f"[dim]{len(text)} chars[/dim]"
+        ))
+    elif text.strip():
+        print(f"\n[THINKING] {text[:200]}...\n")
+
+def update_agent_terminal(text: str) -> None:
+    """Display terminal command in real-time."""
+    global _terminal_buffer
+    _terminal_buffer = text
+    if RICH_AVAILABLE and text.strip():
+        console.print(Panel(
+            Text(text[:2000]),
+            title=f"[bold {C.green}]TERMINAL[/bold {C.green}]",
+            border_style=C.green
+        ))
+    elif text.strip():
+        print(f"\n[TERMINAL] {text[:200]}...\n")
+
+def append_agent_terminal(text: str) -> None:
+    """Append to terminal output."""
+    global _terminal_buffer
+    _terminal_buffer += text
+
+def get_thought_buffer() -> str:
+    """Get current thought buffer for CopixTUI integration."""
+    return _thought_buffer
+
+def get_terminal_buffer() -> str:
+    """Get current terminal buffer for CopixTUI integration."""
+    return _terminal_buffer
+
+def clear_buffers() -> None:
+    """Clear thought and terminal buffers."""
+    global _thought_buffer, _terminal_buffer
+    _thought_buffer = ""
+    _terminal_buffer = ""
+
+# Legacy no-ops for compatibility
+def start_dual_pane(): return None
+def set_agent_meta(step, total, role): pass
+def get_agent_layout(): return None

@@ -14,6 +14,7 @@ from ..ui import header, panel, ok, err, warn, status, ai, task_header, environm
 from ..core.workspace import format_environment
 from .planner import create_plan, format_plan, Task, TaskGraph
 from .reviewer import review_final_output
+from .reviewer import review_final_output, format_review
 def _route_task(task: Task) -> str:
     """Heuristically determine the best expert role for a given task."""
     tags = [t.lower() for t in task.tags]
@@ -58,7 +59,7 @@ def orchestrated_agent_mode(
     from ..core.environment_inspector import inspect_environment
     caps = inspect_environment()
     env_context = f"OS: {caps.get('os')} {caps.get('os_release')}\nBinaries: {caps.get('binaries')}"
-    environment_table(caps)
+    environment_table(caps, goal=goal)
     ok("Environment inspected.")
     
     plan = create_plan(config, goal, env_context=env_context)
@@ -146,8 +147,13 @@ def orchestrated_agent_mode(
                         intent="QUERY",
                         initial_target=initial_target
                     )
-                    
-                    success = "failed" not in review_out.lower() and "error" not in review_out.lower()
+
+                    # Convert analyzer review into a structured ReviewResult using reviewer
+                    review = review_final_output(config, task.title, result, step_context, require_citations=True)
+                    panel("REVIEW RESULT", format_review(review), accent="yellow")
+
+                    # Success only if reviewer accepts and confidence is high
+                    success = review.is_acceptable and review.confidence >= 0.6 and len(review.issues) == 0
                 else:
                     # --- Standard Pipeline with Dynamic Routing ---
                     result = agent_mode(

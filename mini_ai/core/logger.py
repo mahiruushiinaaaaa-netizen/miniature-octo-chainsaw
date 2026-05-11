@@ -242,6 +242,11 @@ class OperationContext:
         _log_context.set(ctx)
 
 
+# Global logger defaults
+_default_level: LogLevel = LogLevel.INFO
+_default_json: bool = False
+_default_log_dir: Optional[Path] = None
+
 # Global logger registry
 _loggers: dict[str, StructuredLogger] = {}
 _registry_lock = threading.Lock()
@@ -254,9 +259,10 @@ def get_logger(
     file_path: Optional[Path] = None,
 ) -> StructuredLogger:
     """Get or create a logger instance."""
+    global _default_level
     with _registry_lock:
         if name not in _loggers:
-            effective_level = level or LogLevel.INFO
+            effective_level = level or _default_level
             _loggers[name] = StructuredLogger(
                 name=name,
                 level=effective_level,
@@ -271,11 +277,16 @@ def configure_logging(
     json_output: bool = False,
     log_dir: Optional[Path] = None,
 ) -> None:
-    """Configure global logging defaults."""
+    """Configure global logging defaults and update existing loggers."""
     global _default_level, _default_json, _default_log_dir
     _default_level = level
     _default_json = json_output
     _default_log_dir = log_dir
+    
+    # Update all existing loggers with new level
+    with _registry_lock:
+        for logger in _loggers.values():
+            logger.level = level
 
 
 def close_all_loggers() -> None:

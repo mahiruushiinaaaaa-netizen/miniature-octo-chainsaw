@@ -52,6 +52,7 @@ class PersistentShellSession:
         self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
         self._stdout_thread.start()
         self._stderr_thread.start()
+        self._on_output = None
 
     def _read_stdout(self):
         """Continuously read stdout and look for sentinels."""
@@ -72,14 +73,19 @@ class PersistentShellSession:
                 self._finish_event.set()
             else:
                 self._stdout_buffer.append(line)
+                if self._on_output:
+                    self._on_output(line)
 
     def _read_stderr(self):
         """Continuously read stderr."""
         for line in iter(self._process.stderr.readline, ''):
             self._stderr_buffer.append(line)
+            if self._on_output:
+                self._on_output(line)
 
-    def execute(self, cmd: str, timeout: int = 600) -> SandboxResult:
+    def execute(self, cmd: str, timeout: int = 600, on_output=None) -> SandboxResult:
         """Execute a command in the persistent shell."""
+        self._on_output = on_output
         if self._process.poll() is not None:
             return SandboxResult(success=False, output="Shell process terminated unexpectedly.", exit_code=-1)
 

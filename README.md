@@ -13,8 +13,15 @@ A production-grade autonomous coding assistant designed with low-end models and 
 - **Tri-Model Architecture:** Start with `--tri-model` to unleash a 3-agent orchestration pipeline. An Agent plans the tasks, an Analyzer investigates the repo and writes context briefs, and a strict Coder model executes the edits.
 - **Robust Agent Orchestration:** Features a stateful `ExecutionContext` with persistent session management, CWD tracking across commands, and automatic environment capability detection.
 - **Framework-Specific Tools:** Includes specialized tools for Laravel project creation, Breeze installation, and migration management, with automatic "step-by-step" guidance extraction from web searches.
-- **Isolated Execution Sandbox**: Features a pluggable sandbox system (`LocalSandbox`, `VenvSandbox`) that isolates command execution and Python dependencies, protecting your host system and project environment.
-- **Platform-Agnostic Interface:** Uses a `PlatformAdapter` to normalize filesystem and process operations across Windows, Linux, and macOS.
+- **Isolated Execution Sandbox**: Features a pluggable sandbox system (`LocalSandbox`, `VenvSandbox`) that isolates command execution and Python dependencies.
+- **JavaScript Code Sandbox**: Integrated a high-performance JS/TS execution engine using **Deno** with restricted permissions and CWD isolation.
+- **Premium RAG Integration**: Automatically switches between full-file injection and semantic snippet retrieval using embeddings for massive codebases.
+- **Premium RAG Integration**: Automatically switches between full-file injection and semantic snippet retrieval using embeddings for massive codebases.
+
+Anti-hallucination improvements: the agent now enriches prompts with retrieved workspace snippets and mandates source citations when using retrieved context. This significantly reduces fabricated facts during autonomous task execution (autopilot).
+- **Intelligent Communication Layer**: Centralized feedback logic that injects actionable hints for common command failures, drastically improving agent autonomy.
+- **Platform-Agnostic Interface**: Uses a `PlatformAdapter` to normalize filesystem and process operations across Windows, Linux, and macOS.
+- **Live Box Hybrid UI**: A modern terminal interface that blends sequential reasoning with boxed execution. Agent thoughts stream naturally in the terminal, while command outputs are isolated in a dedicated, live-updating panel for maximum focus.
 - **Smart Media Player**: Includes an ultra-light floating music player with VLC background playback, autoplay (relevance-based), track queuing, and intelligent enqueuing (searches while playing automatically add to the queue).
 
 ## Project Structure

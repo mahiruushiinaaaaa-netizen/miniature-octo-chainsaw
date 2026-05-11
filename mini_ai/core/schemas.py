@@ -184,6 +184,19 @@ TOOL_SCHEMAS = {
         params=[],
         description="Skip to the next song in the queue",
     ),
+    "python_execute": ToolSchema(
+        name="python_execute",
+        params=[ParamSchema(name="code", type="string", description="Python code to run")],
+        description="Execute a Python code snippet in the current sandbox",
+    ),
+    "javascript_execute": ToolSchema(
+        name="javascript_execute",
+        params=[
+            ParamSchema(name="code", type="string", description="JS/TS code to run"),
+            ParamSchema(name="timeout_seconds", type="int", required=False, description="Execution timeout"),
+        ],
+        description="Execute a JavaScript or TypeScript code snippet using Deno",
+    ),
 }
 
 

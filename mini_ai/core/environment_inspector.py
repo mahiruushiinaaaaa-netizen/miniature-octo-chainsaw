@@ -32,20 +32,31 @@ def get_binary_version(binary: str) -> str:
         return f"Error: {str(e)[:30]}"
 
 def inspect_environment() -> Dict[str, Any]:
-    """Detect system capabilities and environment details."""
-    binaries = ["php", "composer", "node", "npm", "git", "python", "pip", "docker"]
-    results = {
-        "os": platform.system(),
-        "os_release": platform.release(),
-        "binaries": {b: get_binary_version(b) for b in binaries},
-        "cwd": os.getcwd()
+    """Detect system capabilities and environment details categorized by stack."""
+    # Grouped binaries to help prioritize relevance
+    stacks = {
+        "Core": ["git", "docker", "python", "pip"],
+        "JS/Web": ["node", "npm", "npx", "yarn", "bun"],
+        "PHP/Laravel": ["php", "composer", "laravel"],
+        "Mobile": ["java", "javac", "adb", "react-native", "expo", "pod"]
     }
     
-    # Check for Laravel installer specifically
-    laravel_path = shutil.which("laravel")
-    results["binaries"]["laravel"] = "Found" if laravel_path else "Not found"
+    binaries_results = {}
+    for stack, bin_list in stacks.items():
+        for b in bin_list:
+            version = get_binary_version(b)
+            if version != "Not found":
+                binaries_results[b] = {
+                    "version": version,
+                    "stack": stack
+                }
     
-    return results
+    return {
+        "os": platform.system(),
+        "os_release": platform.release(),
+        "binaries": binaries_results,
+        "cwd": os.getcwd()
+    }
 
 if __name__ == "__main__":
     import json

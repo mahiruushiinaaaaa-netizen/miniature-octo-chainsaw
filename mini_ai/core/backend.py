@@ -264,6 +264,31 @@ def completion_from_server(config: Config, prompt: str, max_tokens: int, system_
     return clean_model_output(content)
 
 
+def get_embeddings(config: Config, text: str, timeout: int = 60) -> list[float]:
+    """Get embeddings from llama-server. Returns empty list if embeddings not supported."""
+    url = config.base_url + "/embedding"
+    payload = {"content": text}
+    
+    try:
+        data = http_post_json(url, payload, timeout=timeout)
+        embedding = data.get("embedding")
+        if not embedding or not isinstance(embedding, list):
+            # Server may not support embeddings (e.g., 501 Not Implemented)
+            return []
+        return [float(x) for x in embedding]
+    except urllib.error.HTTPError as he:
+        # Expected when server doesn't support embeddings (501 Not Implemented)
+        if he.code == 501:
+            logger.debug("Embeddings endpoint not supported by server (501 Not Implemented)", operation="embeddings")
+        else:
+            logger.debug(f"HTTP error getting embeddings: {he.code}", operation="embeddings")
+        return []
+    except Exception as e:
+        # Silently fail for other errors - RAG is optional
+        logger.debug(f"Embeddings unavailable: {type(e).__name__}", operation="embeddings")
+        return []
+
+
 # ── Main generate entrypoint ──────────────────────────────────────────────────
 
 def generate(config: Config, prompt: str, max_tokens: int = 128,

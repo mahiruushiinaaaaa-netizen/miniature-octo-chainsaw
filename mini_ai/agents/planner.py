@@ -113,6 +113,7 @@ def create_plan(config: Config, goal: str, env_context: Optional[str] = None) ->
         f"Goal: {goal}\n"
         f"Type: {kind}\n"
         f"Current Environment:\n{env_context or 'Unknown'}\n\n"
+        f"IMPORTANT: For any task that depends on external facts, APIs, or other files, add the tag 'requires_citation' and include a verification subtask.\n"
         f"Return ONLY valid JSON (no markdown):\n"
         f'{{\n'
         f'  "goal": "{goal}",\n'

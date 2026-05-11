@@ -49,10 +49,24 @@ _setup_vlc_paths()
 try:
     import vlc
 except ImportError as e:
-    # Provide a helpful message, but allow the script to fail gracefully when run standalone.
-    print("ERROR: python-vlc not installed. Run: pip install python-vlc", file=sys.stderr)
-    raise
+    # Auto-install python-vlc if missing
+    print("Installing python-vlc...", file=sys.stderr)
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "python-vlc"], 
+                      timeout=60, check=True)
+        print("python-vlc installed. Retrying...", file=sys.stderr)
+        import vlc
+    except subprocess.TimeoutExpired:
+        print("ERROR: python-vlc installation timed out.", file=sys.stderr)
+        raise
+    except subprocess.CalledProcessError:
+        print("ERROR: Failed to install python-vlc. Run: pip install python-vlc", file=sys.stderr)
+        raise
+    except Exception as install_err:
+        print(f"ERROR: Failed to install python-vlc: {install_err}", file=sys.stderr)
+        raise
 
+    print("✓ VLC module loaded successfully", file=sys.stderr)
 # ----------------------------------------------------------------------
 # Helper functions for state and command files
 # ----------------------------------------------------------------------
@@ -139,14 +153,32 @@ class VLCPlayer:
     def _wait_for_playing(self, timeout: float = 15.0) -> bool:
         """Wait until VLC state becomes PLAYING or ERROR, return True if playing."""
         start = time.time()
+        log_file = Path(tempfile.gettempdir()) / "miniai_audio_debug.log"
         while time.time() - start < timeout and not self._stop_requested:
-            state = self._player.get_state()
+            try:
+                state = self._player.get_state()
+            except Exception as e:
+                with open(log_file, 'a') as f:
+                    f.write(f"[{time.ctime()}] _wait_for_playing: get_state() raised: {e}\n")
+                return False
+
+            # Log state for diagnostics
+            try:
+                with open(log_file, 'a') as f:
+                    f.write(f"[{time.ctime()}] VLC state: {state}\n")
+            except Exception:
+                pass
+
             if state == vlc.State.Playing:
                 return True
             if state in (vlc.State.Error, vlc.State.Stopped):
                 return False
             time.sleep(0.1)
-        return self._player.get_state() == vlc.State.Playing
+
+        try:
+            return self._player.get_state() == vlc.State.Playing
+        except Exception:
+            return False
 
     def _update_state(self) -> None:
         """Read current player state and write to JSON file only when necessary."""
@@ -390,8 +422,19 @@ class VLCPlayer:
 
         # Start playback
         self._player.play()
-        if not self._wait_for_playing():
-            # Failed to start
+        # Log initial play call
+        try:
+            with open(Path(tempfile.gettempdir()) / "miniai_audio_debug.log", 'a') as f:
+                f.write(f"[{time.ctime()}] play() called for: {self.title}\n")
+        except Exception:
+            pass
+
+        if not self._wait_for_playing(timeout=20.0):
+            try:
+                with open(Path(tempfile.gettempdir()) / "miniai_audio_debug.log", 'a') as f:
+                    f.write(f"[{time.ctime()}] Failed to reach PLAYING state for: {self.title}\n")
+            except Exception:
+                pass
             write_state(self.state_file, {
                 "pid": os.getpid(),
                 "title": self.title,
@@ -411,7 +454,22 @@ class VLCPlayer:
                 self._apply_command(cmd_data)
 
             # Check VLC state
-            state = self._player.get_state()
+            try:
+                state = self._player.get_state()
+            except Exception as e:
+                try:
+                    with open(Path(tempfile.gettempdir()) / "miniai_audio_debug.log", 'a') as f:
+                        f.write(f"[{time.ctime()}] get_state() raised in loop: {e}\n")
+                except Exception:
+                    pass
+                break
+
+            # Log state each loop for diagnostics
+            try:
+                with open(Path(tempfile.gettempdir()) / "miniai_audio_debug.log", 'a') as f:
+                    f.write(f"[{time.ctime()}] Loop VLC state: {state}\n")
+            except Exception:
+                pass
 
             # Handle loop: if ended and loop is True, restart
             if state == vlc.State.Ended and self.loop and not self._stop_requested:

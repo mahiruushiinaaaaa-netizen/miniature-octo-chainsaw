@@ -15,9 +15,9 @@ class LocalSandbox(SandboxProvider):
         self.pm = pm
         self._session = PersistentShellSession(cwd=pm.effective_root)
 
-    def execute(self, cmd: str, timeout: int = 600) -> SandboxResult:
+    def execute(self, cmd: str, timeout: int = 600, on_output=None) -> SandboxResult:
         # Use the persistent session
-        return self._session.execute(cmd, timeout)
+        return self._session.execute(cmd, timeout, on_output=on_output)
 
     def write_file(self, path: str, content: str) -> bool:
         target = self.pm.resolve_target(path)

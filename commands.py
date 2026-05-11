@@ -24,6 +24,7 @@ from ..tools.file_ops import read_file_command
 from ..tools.linter import lint_file
 from .executor import ToolExecutor
 from ..tools.file_writer import SafeFileWriter
+from ..tools.task_tools import task_kind
 
 
 # ─── Chat History ─────────────────────────────────────────────────────────────
@@ -769,11 +770,66 @@ class CommandRouter:
             logger.debug(f"Direct action execution failed: {e}")
             return None
 
+    def _execute_laravel_setup(self, goal: str) -> Optional[str]:
+        """Create a Laravel project directly so setup requests complete autonomously."""
+        try:
+            pm = PathManager(self.config.workspace)
+            writer = SafeFileWriter(pm)
+            executor = ToolExecutor(self.config, pm, writer)
+
+            target_dir = pm.set_target_from_goal(goal) or pm.effective_root
+            project_name = "laravel_project"
+            project_path = target_dir / project_name
+
+            panel("LARAVEL SETUP", f"Preparing Laravel project in {project_path}")
+
+            executor.execute({"action": "run_cmd", "command": f'mkdir "{project_path}"', "cwd": str(target_dir)}, assume_yes=True)
+
+            is_final, result_json = executor.execute(
+                {"action": "laravel_create_project", "name": project_name, "cwd": str(target_dir)},
+                assume_yes=True,
+            )
+
+            import json
+            result_data = json.loads(result_json)
+            output = result_data.get("output", "")
+            success = bool(result_data.get("success", False))
+
+            npm_path = executor.context.capabilities.get("binaries", {}).get("npm")
+            if success and npm_path and (project_path / "package.json").exists():
+                executor.execute({"action": "run_cmd", "command": "npm install", "cwd": str(project_path)}, assume_yes=True)
+                executor.execute({"action": "run_cmd", "command": "npm run build", "cwd": str(project_path)}, assume_yes=True)
+
+            verify = []
+            if (project_path / "composer.json").exists():
+                verify.append("composer.json present")
+            if (project_path / "package.json").exists():
+                verify.append("package.json present")
+
+            if success:
+                return (
+                    f"Laravel project created in {project_path}. "
+                    + (f"Verification: {', '.join(verify)}." if verify else "")
+                    + (f"\n{output[:1000]}" if output else "")
+                )
+
+            return f"Laravel setup failed in {project_path}.\n{output[:1500]}"
+
+        except Exception as e:
+            from .logger import get_logger
+            logger = get_logger("commands")
+            logger.debug(f"Laravel setup direct execution failed: {e}")
+            return None
+
     def _is_vague_command(self, goal: str) -> bool:
         """Detect vague/unclear commands that need web search for context."""
         lowered = goal.lower().strip()
         # Skip if it's a continuation command
         if self._is_continuation_command(goal):
+            return False
+
+        # Setup/build requests should not be treated as vague; they need agent execution.
+        if self._is_setup_guidance(goal):
             return False
         
         # Pronouns or context words indicate it's likely a follow-up, not vague
@@ -820,7 +876,7 @@ class CommandRouter:
             return None
 
     def _is_setup_guidance(self, goal: str) -> bool:
-        """Detect setup/build/install/create requests that should search the web first."""
+        """Detect setup/build/install/create requests that should be handled by the agent."""
         lowered = goal.lower().strip()
 
         setup_keywords = [
@@ -833,11 +889,8 @@ class CommandRouter:
         has_setup_shape = any(kw in lowered for kw in setup_keywords)
         has_action_shape = any(kw in lowered for kw in action_words)
 
-        # Prefer web guidance for short setup/build requests that don't point at a specific file edit.
-        if has_setup_shape and has_action_shape:
-            return True
-
-        if has_setup_shape and len(lowered.split()) <= 10:
+        # Any obvious setup/build/install/create request should be routed to the agent.
+        if has_setup_shape or has_action_shape:
             return True
 
         return False
@@ -852,7 +905,60 @@ class CommandRouter:
         if "how to" not in expanded.lower() and "install" not in expanded.lower():
             expanded = f"how to {expanded}"
 
-        return self._search_for_vague_intent(expanded)
+        web_result = self._search_for_vague_intent(expanded)
+        canonical_guide = self._build_setup_guide(goal)
+
+        if web_result and canonical_guide:
+            return f"{canonical_guide}\n\nWeb reference:\n{web_result}"
+        if web_result:
+            return web_result
+        return canonical_guide
+
+    def _build_setup_guide(self, goal: str) -> Optional[str]:
+        """Build a concrete setup checklist for common project setup requests."""
+        lowered = goal.lower().strip()
+
+        if "laravel" in lowered:
+            project_name = "<project-name>"
+            guide = [
+                "1. Open your Downloads folder.",
+                f"2. Create the Laravel project there with: composer create-project laravel/laravel {project_name}",
+                f"3. Enter the project folder with: cd {project_name}",
+                "4. Start the app with: php artisan serve",
+            ]
+            if "breeze" in lowered or "auth" in lowered:
+                guide.extend([
+                    "5. Install auth scaffolding with: composer require laravel/breeze --dev",
+                    "6. Run: php artisan breeze:install blade",
+                    "7. Install frontend dependencies with: npm install && npm run build",
+                ])
+            return "\n".join(guide)
+
+        if any(term in lowered for term in ["react native", "expo"]):
+            return "\n".join([
+                "1. Open your target folder.",
+                "2. Run the framework bootstrap command for the project.",
+                "3. Install dependencies.",
+                "4. Start the development server and verify the app launches.",
+            ])
+
+        if any(term in lowered for term in ["vite", "next.js", "next js"]):
+            return "\n".join([
+                "1. Open your target folder.",
+                "2. Create the app scaffold with the framework generator.",
+                "3. Install dependencies.",
+                "4. Start the dev server and confirm the project runs.",
+            ])
+
+        if any(term in lowered for term in ["setup", "install", "create", "build", "scaffold"]):
+            return "\n".join([
+                "1. Identify the exact project name and target folder.",
+                "2. Create the project scaffold in that folder.",
+                "3. Install dependencies.",
+                "4. Run the project once to verify the setup.",
+            ])
+
+        return None
     
     def _expand_vague_goal(self, goal: str) -> str:
         """Expand vague goal into a proper search query."""
@@ -1156,10 +1262,9 @@ class CommandRouter:
             if not any(k in lowered for k in ["fix", "change", "edit", "add", "remove", "update"]):
                 return "QUERY"
 
-        # Setup / build guidance should use the fast helper model and web search first.
+        # Setup / build guidance should route to the agent first with task-oriented planning.
         if any(keyword in lowered for keyword in ["setup", "set up", "install", "create project", "create app", "build app", "starter", "scaffold", "initialize", "init"]):
-            if not any(ext in lowered for ext in [".py", ".js", ".ts", ".html", ".css", "/", "\\"]):
-                return "QUERY"
+            return "TASK"
                 
         # 4. Tier 2: Targeted Edit (check before broad CONVO catch-all)
         if any(keyword in lowered for keyword in ["fix", "edit", "change", "add ", "remove ", "update "]):
@@ -1178,6 +1283,32 @@ class CommandRouter:
                 
         # 5. Tier 3: Default Explore
         return "EXPLORE"
+
+    def _should_auto_orchestrate(self, goal: str, intent: str) -> bool:
+        """Detect goals that are large enough to benefit from the orchestrator automatically."""
+        if intent == "COMPLEX":
+            return True
+
+        lowered = goal.lower().strip()
+        words = lowered.split()
+        kind = task_kind(goal)
+
+        big_keywords = [
+            "build", "create", "setup", "set up", "scaffold", "refactor",
+            "from scratch", "full", "complete", "integrate", "migrate",
+            "dashboard", "admin", "app", "project", "website", "system",
+        ]
+        if len(words) >= 8 and any(keyword in lowered for keyword in big_keywords):
+            return True
+
+        if kind in {"install", "code_or_files"} and len(words) >= 7:
+            if any(keyword in lowered for keyword in ["project", "app", "website", "system", "dashboard", "auth", "laravel", "react", "next", "django", "node"]):
+                return True
+
+        if any(keyword in lowered for keyword in ["from scratch", "full stack", "end to end", "multiple pages", "multi page", "admin dashboard"]):
+            return True
+
+        return False
 
     def _is_continuation_command(self, goal: str) -> bool:
         """Detect phrases like 'do it', 'do that', 'go ahead' that refer to previous goal."""
@@ -1206,6 +1337,14 @@ class CommandRouter:
             self.last_goal = goal
             self.observations = [] # Reset observations for new goal
             force_coding = False
+
+        lowered_goal = goal.lower().strip()
+        if "laravel" in lowered_goal and any(keyword in lowered_goal for keyword in ["setup", "set up", "install", "create", "build", "scaffold", "initialize", "init"]):
+            direct_result = self._execute_laravel_setup(goal)
+            if direct_result:
+                self.chat_history.append("ASSISTANT", direct_result)
+                self.memory.add_event(f"Laravel setup direct path: {goal}\nResult: {direct_result}")
+                return
 
         self.chat_history.append("USER", goal)
         
@@ -1272,16 +1411,34 @@ class CommandRouter:
                 return
 
         # ── Setup / Build Guidance Fast-Path ──
-        # Search the web first for setup/build/create/install requests, then auto-execute.
-        setup_guidance = None
+        # Let the agent plan first for setup/build/create/install requests.
         if self._is_setup_guidance(goal):
-            setup_guidance = self._search_setup_guidance(goal)
-            if setup_guidance:
-                self.chat_history.append("ASSISTANT", setup_guidance)
-                self.memory.add_event(f"Setup guidance search: {goal}\nResult: {setup_guidance}")
-                # Don't return - continue to execution with guidance in context
-                # Force EXPLORE intent to use coding model for actual implementation
-                intent = "EXPLORE"
+            # Extract target location from goal (e.g., "in pc downloads folder" → ~/Downloads)
+            pm = PathManager(Path(self.config.workspace))
+            target_dir = pm.set_target_from_goal(goal)
+            
+            if target_dir:
+                # Inject target directory instruction FIRST, before any other guidance
+                location_directive = f"CRITICAL: This task must be executed in: {target_dir}\nNavigate there FIRST before running any setup commands."
+                self.observations.append(location_directive)
+                self.memory.add_event(f"Target directory extracted: {target_dir}")
+            
+            setup_hint = (
+                "This is a setup/build request. First create a concrete plan and execute it with available tools. "
+                "Only use web_search if you are blocked by a missing dependency or an uncertain installation step. "
+                "Do not stop at a search-only summary."
+            )
+            self.observations.append(setup_hint)
+            self.memory.add_event(f"Setup planning hint: {goal}\nHint: {setup_hint}")
+            # Force TASK intent so the agent plans and executes instead of answering with a generic search summary.
+            intent = "TASK"
+
+            if "laravel" in goal.lower():
+                direct_result = self._execute_laravel_setup(goal)
+                if direct_result:
+                    self.chat_history.append("ASSISTANT", direct_result)
+                    self.memory.add_event(f"Laravel setup direct path: {goal}\nResult: {direct_result}")
+                    return
         
         # ── Vague/Unclear Command Detector ──
         # If goal is too vague ("do it", "help me", etc.), search web for context
@@ -1293,8 +1450,10 @@ class CommandRouter:
                 return
             
         # ── Auto-Orchestrator Route ──
-        if intent == "COMPLEX" and not self.use_orchestrator:
-            ok("Auto-detected a massive task. Dynamically enabling the Multi-Agent Orchestrator...")
+        # Skip auto-orchestrator for setup tasks so they can use location-aware agent handling
+        is_setup = self._is_setup_guidance(goal)
+        if self._should_auto_orchestrate(goal, intent) and not self.use_orchestrator and not is_setup:
+            ok("Auto-detected a large task. Dynamically enabling the Multi-Agent Orchestrator...")
             use_orch = True
         else:
             use_orch = self.use_orchestrator

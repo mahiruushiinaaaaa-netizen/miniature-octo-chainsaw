@@ -11,6 +11,7 @@ import shlex
 import shutil
 import ssl
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -44,6 +45,7 @@ from .recovery import RecoveryManager
 from .errors import ExecutionError, ErrorContext
 from .environment_inspector import inspect_environment
 from .sandbox.security import CommandRiskScorer
+from .rag import RAGManager
 
 
 @dataclass
@@ -83,6 +85,7 @@ class ToolExecutor:
         self.pm = pm
         self.writer = writer
         self.active_processes: dict[str, subprocess.Popen] = {}
+        self.rag = RAGManager(config)
         self._metrics = get_metrics_collector()
         self._recovery = RecoveryManager()
         self.adapter = get_platform_adapter()
@@ -100,6 +103,7 @@ class ToolExecutor:
             "git_add": self.tool_git_add,
             "git_commit": self.tool_git_commit,
             "python_execute": self.tool_python_execute,
+            "javascript_execute": self.tool_javascript_execute,
             "laravel_create_project": self.tool_laravel_create_project,
             "laravel_install_breeze": self.tool_laravel_install_breeze,
             "laravel_migrate": self.tool_laravel_migrate,
@@ -342,7 +346,26 @@ class ToolExecutor:
                 if not is_probably_text(path):
                     failed_paths.append(f"{f} (binary or non-text)")
                     continue
-                size = path.stat().st_size
+                
+                stat = path.stat()
+                size = stat.st_size
+                
+                # Check RAG strategy
+                # For simplicity in tool_read_files, we just check the byte size threshold
+                # and token estimate against the config context limit
+                tokens = self.rag.get_token_estimate(path.read_text(encoding="utf-8", errors="replace")[:100000]) # Sample for estimate
+                strategy = self.rag.decide_strategy(size, tokens, self.config.ctx)
+                
+                if strategy == "retrieval" and self.context.last_output:
+                    # If we need retrieval, we use the query that led to this read (last output or goal)
+                    # For now, let's just use the file name as a query if no better goal exists
+                    query = self.context.last_output[:200] if self.context.last_output else f"Context from {f}"
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                    snippets = self.rag.retrieve_relevant_snippets(query, {f: content}, top_k=3)
+                    chunks.append(self.rag.format_rag_context(snippets))
+                    read_paths.append(str(path))
+                    continue
+
                 with path.open("rb") as handle:
                     raw = handle.read(_MAX_READ_BYTES)
                 content = raw.decode("utf-8", errors="replace")
@@ -405,6 +428,23 @@ class ToolExecutor:
             except Exception as e:
                 return False, self.result(False, f"File creation failed: {e}")
 
+        # Smart Windows directory creation fallback
+        mkdir_match = re.search(r'^mkdir\s+(?:-p\s+)?(.+)', cmd, re.IGNORECASE)
+        if mkdir_match:
+            raw_target = mkdir_match.group(1).strip().strip('"').strip("'")
+            try:
+                # Handle potential multiple targets or broken quoting by checking for existence
+                target_path = Path(raw_target)
+                if not target_path.is_absolute():
+                    target_path = Path(cwd) / target_path
+                
+                target_path.mkdir(parents=True, exist_ok=True)
+                if target_path.exists():
+                    return False, self.result(True, f"Created directory structure: {target_path}")
+            except Exception:
+                # If path is too complex (contains multiple dirs in one line), fall through to shell
+                pass
+
         if not self.config.allow_run:
             return False, self.result(False, "Command execution disabled. Start with --allow-run to enable.")
         
@@ -439,48 +479,35 @@ class ToolExecutor:
                 return False, self.result(False, "User cancelled command")
 
         try:
-            # Use Sandbox for execution
-            res = self.sandbox.execute(cmd, timeout=600)
+            # Use LiveTerminalBox for focused, live-updating output
+            from ..ui import LiveTerminalBox
+            with LiveTerminalBox(cmd) as box:
+                res = self.sandbox.execute(cmd, timeout=600, on_output=box.append)
+            
             return_code = res.exit_code
             stdout = res.stdout
             stderr = res.stderr
 
             output = stdout + ("\n" + stderr if stderr else "")
             
-            if return_code != 0:
-                # Generalized path quoting hint for Windows common errors
-                output_low = output.lower()
-                if ("syntax of the command is incorrect" in output_low or "not recognized" in output_low) \
-                   and (" " in cmd or "/" in cmd or "\\" in cmd) and '"' not in cmd:
-                    output += "\nCRITICAL HINT: Windows detected. Use DOUBLE QUOTES around paths with spaces! Example: \"C:/Users/Name/Folder/file.txt\""
-                
-                if "'touch' is not recognized" in output or "touch: command not found" in output_low:
-                    output += "\nWINDOWS HINT: 'touch' is not a native command. Use 'type nul > filename' or 'echo. > filename' to create empty files."
-
-                if "Too many arguments to \"create-project\"" in output:
-                    output += (
-                        "\nHint: composer create-project laravel/laravel <project_dir> "
-                        "(install Breeze afterward with composer require laravel/breeze --dev and php artisan breeze:install)."
-                    )
-            
             if return_code == 0:
-                # Update persistent CWD if it was a cd command (supporting chained && or ;)
+                # Update persistent CWD if it was a cd command (supporting optional /d flag)
                 import re
-                cd_match = re.search(r"(?:^|&&|;)\s*cd\s+([^&;]+)", cmd, re.IGNORECASE)
+                cd_match = re.search(r"(?:^|&&|;)\s*cd\s+(?:/d\s+)?([^&;]+)", cmd, re.IGNORECASE)
                 if cd_match:
                     new_rel = cd_match.group(1).strip().strip('"').strip("'")
                     try:
                         # Handle both absolute and relative targets
                         target_path = Path(new_rel)
-                        if target_path.is_absolute():
-                            new_cwd = target_path.resolve()
+                        if not target_path.is_absolute():
+                            target_path = (cwd / new_rel).resolve()
                         else:
-                            new_cwd = (cwd / new_rel).resolve()
+                            target_path = target_path.resolve()
                             
-                        if new_cwd.exists() and new_cwd.is_dir():
-                            self.context.cwd = new_cwd
+                        if target_path.exists() and target_path.is_dir():
+                            self.context.cwd = target_path
                             self.pm.set_target(self.context.cwd)
-                            output += f"\n[Session] CWD updated to: {self.context.cwd}"
+                            output += f"\n[Session] CWD updated to: {self.context.cwd}\nSUCCESS: You have arrived at the destination. Use 'answer' to finish this task if navigation was your goal."
                     except Exception:
                         pass
 
@@ -519,19 +546,40 @@ class ToolExecutor:
         relevant = relevant_files(index, goal, limit=max_files) if goal else []
         snippets: list[dict[str, Any]] = []
 
-        for path_str in relevant[:max_snippets]:
-            path = Path(path_str)
-            try:
-                if not path.exists() or not path.is_file():
-                    continue
-                from ..tools.file_ops import is_probably_text
-                if not is_probably_text(path):
-                    continue
-                with path.open("r", encoding="utf-8", errors="replace") as handle:
-                    preview = handle.read(snippet_chars).rstrip()
-                snippets.append({"path": str(path), "preview": preview})
-            except Exception as exc:
-                snippets.append({"path": str(path), "error": str(exc)})
+        if goal and relevant:
+            # Use RAG to get the most relevant snippets from the top candidate files
+            candidate_contents = {}
+            for path_str in relevant[:max_snippets * 2]: # Look at more candidates for RAG
+                p = Path(path_str)
+                if p.exists() and p.is_file():
+                    try:
+                        candidate_contents[path_str] = p.read_text(encoding="utf-8", errors="replace")
+                    except: continue
+            
+            if candidate_contents:
+                rag_snippets = self.rag.retrieve_relevant_snippets(goal, candidate_contents, top_k=max_snippets)
+                for rs in rag_snippets:
+                    snippets.append({
+                        "path": rs["path"],
+                        "preview": rs["content"],
+                        "score": rs["score"]
+                    })
+        
+        # Fallback to simple snippets if RAG failed or no goal
+        if not snippets:
+            for path_str in relevant[:max_snippets]:
+                path = Path(path_str)
+                try:
+                    if not path.exists() or not path.is_file():
+                        continue
+                    from ..tools.file_ops import is_probably_text
+                    if not is_probably_text(path):
+                        continue
+                    with path.open("r", encoding="utf-8", errors="replace") as handle:
+                        preview = handle.read(snippet_chars).rstrip()
+                    snippets.append({"path": str(path), "preview": preview})
+                except Exception as exc:
+                    snippets.append({"path": str(path), "error": str(exc)})
 
         summary_lines = [
             "Workspace scan summary",
@@ -776,26 +824,59 @@ class ToolExecutor:
 
         return results
 
-    def _extract_steps(self, text: str) -> str:
+    def _extract_steps(self, text: str, max_steps: int = 10) -> str:
         """Extract numbered or bulleted steps from text."""
         lines = text.split('\n')
         steps = []
         for line in lines:
             line = line.strip()
             # Look for numbered steps: 1. 2. etc., or bullets: - * 
-            if re.match(r'^\d+\.|\*|-', line) and len(line) > 10:
+            if re.match(r'^\d+[\.\)]\s+', line) and len(line) > 10:
                 steps.append(line)
             # Also look for "Step 1:" etc.
-            if re.match(r'(?i)step \d+:', line):
+            elif re.match(r'(?i)step \d+[:\.\)]', line):
                 steps.append(line)
+            # Look for command/code indicators
+            elif line.startswith('$ ') or line.startswith('> ') or line.startswith('npm ') or line.startswith('npx '):
+                if len(line) > 5:
+                    steps.append(f"`{line}`")
         if steps:
-            return "\n".join(steps[:10])  # Limit to 10 steps
+            return "\n".join(steps[:max_steps])
         return ""
+    
+    def _extract_code_and_lists(self, text: str, max_chars: int = 2000) -> str:
+        """Extract code blocks and list items as fallback step extraction."""
+        lines = text.split('\n')
+        extracted = []
+        in_code_block = False
+        
+        for line in lines:
+            stripped = line.strip()
+            # Detect code blocks
+            if stripped.startswith('```') or stripped.startswith('~~~'):
+                in_code_block = not in_code_block
+                extracted.append(line)
+            elif in_code_block:
+                extracted.append(line)
+            # Detect inline code (commands)
+            elif '`' in stripped and len(stripped) > 3:
+                extracted.append(stripped)
+            # Detect list items
+            elif re.match(r'^[\*\-\+]\s+', stripped) and len(stripped) > 5:
+                extracted.append(stripped)
+            # Detect numbered items
+            elif re.match(r'^\d+[\.\)]\s+', stripped) and len(stripped) > 5:
+                extracted.append(stripped)
+        
+        result = "\n".join(extracted)
+        if len(result) > max_chars:
+            result = result[:max_chars] + "\n... (truncated)"
+        return result if result else "(No clear steps found in documentation)"
 
     # --- Web Search Tool ---
 
     def tool_web_search(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
-        """Enhanced web search. Returns structured results for the top 5 links."""
+        """Focused web search. Returns best single result with detailed steps for setup queries."""
         query = str(action.get("query", "") or action.get("url", "") or action.get("content", "")).strip()
         if not query:
             return False, self.result(False, "Missing search query")
@@ -808,7 +889,8 @@ class ToolExecutor:
             except Exception:
                 from duckduckgo_search import DDGS
 
-            ddg_results = list(DDGS().text(query, max_results=5))
+            # Get only top 3 results for focused search
+            ddg_results = list(DDGS().text(query, max_results=3))
             for r in ddg_results:
                 results.append({
                     "title": r.get("title", "?"),
@@ -817,39 +899,49 @@ class ToolExecutor:
                 })
         except Exception:
             # Method 2: DDG HTML scraping fallback
-            results = self._scrape_ddg_results(query)
+            results = self._scrape_ddg_results(query, max_results=3)
 
         if not results:
             return False, self.result(False, f"No search results found for: {query}")
 
-        # For setup/install queries, try to fetch the top result and extract steps
-        is_setup_query = any(word in query.lower() for word in ["setup", "install", "how to", "create", "build"])
-        steps_content = ""
-        if is_setup_query and results:
-            top_url = results[0]["url"]
+        # For setup/install queries, focus on the best result and extract detailed steps
+        is_setup_query = any(word in query.lower() for word in ["setup", "install", "how to", "create", "build", "guide"])
+        lines = [f"Best result for: {query}", ""]
+        
+        # Get the best result (usually first)
+        best = results[0]
+        lines.append(f"Source: {best['title']}")
+        lines.append(f"URL: {best['url']}")
+        if best.get("snippet"):
+            lines.append(f"Summary: {best['snippet'][:300]}")
+        lines.append("")
+        
+        # For setup queries, fetch and extract detailed steps
+        if is_setup_query:
+            lines.append("=" * 50)
+            lines.append("STEP-BY-STEP GUIDE:")
+            lines.append("=" * 50)
             try:
-                html = self._http_fetch(top_url, timeout=10)
-                text = re.sub(r'<(script|style|nav|footer)[^>]*>.*?</\1>', '', html, flags=re.I | re.S)
-                text = re.sub(r'<[^>]+>', ' ', text)
-                text = re.sub(r'\s+', ' ', text).strip()
-                steps_content = self._extract_steps(text)
-            except Exception:
-                pass
-
-        lines = ["Search results for: " + query, ""]
-        if steps_content:
-            lines.append("Extracted Setup Steps:")
-            lines.append(steps_content)
+                html = self._http_fetch(best["url"], timeout=15)
+                # Better HTML cleaning
+                text = re.sub(r'<(script|style|nav|footer|header|aside|form)[^>]*>.*?</\1>', '', html, flags=re.I | re.S)
+                text = re.sub(r'<[^>]+>', '\n', text)
+                text = re.sub(r'\n\s*\n', '\n\n', text)
+                text = re.sub(r'[ \t]+', ' ', text).strip()
+                steps_content = self._extract_steps(text, max_steps=15)
+                if steps_content:
+                    lines.append(steps_content)
+                else:
+                    # Fallback: extract code blocks and numbered lists
+                    lines.append(self._extract_code_and_lists(text))
+            except Exception as e:
+                lines.append(f"(Could not fetch detailed steps: {str(e)[:50]})")
+        
+        if len(results) > 1:
             lines.append("")
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r['title']}")
-            lines.append(f"   URL: {r['url']}")
-            if r.get("snippet"):
-                lines.append(f"   {r['snippet'][:200]}")
-            lines.append("")
-
-        lines.append("TIP: Use 'read_url' with the URL above to get full content.")
-        lines.append("TIP: For big documentations, use action 'read_url' with 'mode':'map' to see the page structure.")
+            lines.append("Other references:")
+            for r in results[1:]:
+                lines.append(f"  - {r['title']}: {r['url']}")
 
         return False, self.result(True, "\n".join(lines))
 
@@ -1013,7 +1105,54 @@ class ToolExecutor:
                         else:
                             return False, self.result(False, f"Could not extract audio URL from: {url_or_query}")
             except ImportError:
-                return False, self.result(False, "yt-dlp not installed. Run 'pip install yt-dlp' to enable music playback.")
+                # Auto-install yt-dlp if assume_yes is True
+                if _ay:
+                    ok("Installing yt-dlp...")
+                    try:
+                        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "yt-dlp"], 
+                                     timeout=60, check=True)
+                        ok("yt-dlp installed. Retrying...")
+                        # Retry the import and operation
+                        import yt_dlp
+                        
+                        ydl_opts = {
+                            "format": "bestaudio",
+                            "quiet": True,
+                            "no_warnings": True,
+                            "default_search": "ytsearch1",
+                            "socket_timeout": 30,
+                        }
+                        
+                        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+                            info = ydl.extract_info(url_or_query, download=False)
+                            
+                            if isinstance(info, dict):
+                                if "entries" in info and isinstance(info["entries"], list) and info["entries"]:
+                                    info = info["entries"][0]
+                                
+                                title = info.get("title", "Unknown Title")
+                                final_url = info.get("url")
+                                
+                                if not final_url:
+                                    formats = info.get("formats", [])
+                                    for fmt in formats:
+                                        if fmt.get("vcodec") == "none" and fmt.get("acodec") != "none":
+                                            final_url = fmt.get("url")
+                                            break
+                                
+                                if final_url:
+                                    ok(f"Found: {title}")
+                                    return self._play_audio_file(final_url, title, original_query=url_or_query)
+                                else:
+                                    return False, self.result(False, f"Could not extract audio URL from: {url_or_query}")
+                    except subprocess.TimeoutExpired:
+                        return False, self.result(False, "yt-dlp installation timed out.")
+                    except subprocess.CalledProcessError:
+                        return False, self.result(False, "Failed to install yt-dlp. Run 'pip install yt-dlp' manually.")
+                    except Exception as e:
+                        return False, self.result(False, f"Error installing yt-dlp: {e}")
+                else:
+                    return False, self.result(False, "yt-dlp not installed. Run 'pip install yt-dlp' to enable music playback.")
             except Exception as e:
                 logger.debug(f"yt-dlp search failed: {e}")
                 # Fall through to try direct URL playback
@@ -1066,8 +1205,30 @@ class ToolExecutor:
             import sys
             player_proc = subprocess.Popen(
                 [sys.executable, "-m", "mini_ai.tools.audio_player", str(url), title],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
             self.active_processes["player"] = player_proc
+            # Wait longer for auto-install to happen (up to 10 seconds)
+            for attempt in range(40):  # 40 * 0.25 = 10 seconds
+                time.sleep(0.25)
+                poll_result = player_proc.poll()
+                if poll_result is not None and poll_result != 0:
+                    # Process exited with error, get stderr
+                    try:
+                        _, stderr = player_proc.communicate(timeout=1)
+                        error_msg = stderr.decode('utf-8', errors='ignore') if stderr else "Unknown error"
+                        logger.debug(f"Audio player startup error: {error_msg}")
+                        return False, self.result(False, f"Audio player error: {error_msg[:150]}")
+                    except subprocess.TimeoutExpired:
+                        player_proc.kill()
+                    # Try a browser-based fallback before giving up
+                    try:
+                        webbrowser.open(url, new=2)
+                        ok(f"Opened {url} in web browser as fallback")
+                        return False, self.result(True, f"Opened in browser as fallback: {url}")
+                    except Exception:
+                        return False, self.result(False, "Audio player startup failed")
             
             # Spawn floating UI (watching the audio player process)
             from ..tools.floating_player import spawn_player
@@ -1076,6 +1237,8 @@ class ToolExecutor:
             ok(f"Started new player: {title}")
             return False, self.result(True, f"Started player: {title}")
         
+        except subprocess.TimeoutExpired:
+            return False, self.result(False, "Audio player startup timed out")
         except Exception as e:
             logger.debug(f"Audio playback error: {e}")
             return False, self.result(False, f"Playback error: {str(e)}")
@@ -1231,3 +1394,79 @@ class ToolExecutor:
         from ..tools.laravel_tools import run_migrations
         success, output = run_migrations(path)
         return False, self.result(success, output)
+
+    def tool_javascript_execute(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        code = action.get("code", "")
+        timeout_seconds = int(action.get("timeout_seconds", 5))
+        
+        deno_path = self._find_deno()
+        if not deno_path:
+            return False, self.result(False, "Deno binary not found. Please install Deno (https://deno.land/) to run JavaScript/TypeScript snippets.")
+            
+        import tempfile
+        # Create a temporary .ts file to support both JS and TS
+        with tempfile.NamedTemporaryFile("w", suffix=".ts", delete=False, encoding="utf-8") as f:
+            f.write(code)
+            temp_path = f.name
+            
+        try:
+            # Deno permission flags for maximum safety
+            cmd = [
+                deno_path,
+                "run",
+                "--allow-read=.",
+                "--allow-write=.",
+                "--no-prompt",
+                "--deny-net",
+                "--deny-env",
+                "--deny-sys",
+                "--deny-run",
+                "--deny-ffi",
+                temp_path
+            ]
+            
+            start_time = time.perf_counter()
+            proc = subprocess.run(
+                cmd,
+                cwd=str(self.pm.effective_root),
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env={"NO_COLOR": "true"}
+            )
+            
+            elapsed = (time.perf_counter() - start_time) * 1000
+            output = proc.stdout + ("\n" + proc.stderr if proc.stderr else "")
+            
+            return False, self.result(proc.returncode == 0, output, duration_ms=elapsed)
+            
+        except subprocess.TimeoutExpired:
+            return False, self.result(False, f"Execution timed out after {timeout_seconds} seconds.")
+        except Exception as e:
+            return False, self.result(False, f"Execution error: {str(e)}")
+        finally:
+            try: os.unlink(temp_path)
+            except: pass
+
+    def _find_deno(self) -> str | None:
+        """Find the deno binary on the system."""
+        # 1. Check if 'deno' is in PATH
+        deno_in_path = shutil.which("deno")
+        if deno_in_path:
+            return deno_in_path
+            
+        # 2. Check common Windows installation path
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            common_win_path = Path(local_app_data) / "deno" / "bin" / "deno.exe"
+            if common_win_path.exists():
+                return str(common_win_path)
+                
+        # 3. Check LM Studio internal path as a fallback (if present)
+        # Assuming LM Studio might be installed in default location
+        user_home = Path.home()
+        lms_deno = user_home / ".lmstudio" / ".internal" / "utils" / "deno.exe"
+        if lms_deno.exists():
+            return str(lms_deno)
+            
+        return None

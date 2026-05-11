@@ -24,7 +24,7 @@ class ReviewResult:
     suggestions: list[str]
 
 
-def review_final_output(config: Config, goal: str, output: str, context: str = "") -> ReviewResult:
+def review_final_output(config: Config, goal: str, output: str, context: str = "", require_citations: bool = False) -> ReviewResult:
     """
     Review agent output for quality, correctness, and goal alignment.
     Returns whether output is acceptable and what issues were found.
@@ -82,6 +82,19 @@ def review_final_output(config: Config, goal: str, output: str, context: str = "
             confidence=0.0,
             suggestions=[],
         )
+
+
+def _heuristic_citation_check(output: str) -> bool:
+    """Return True if output contains probable file-path citations."""
+    import re
+    if not output:
+        return False
+    # Look for typical file paths and markdown-style file markers
+    if re.search(r"---\s*FILE:\s*", output):
+        return True
+    if re.search(r"[A-Za-z0-9_\-./\\]+\.(py|js|ts|php|md|txt|json|html|css)", output):
+        return True
+    return False
 
 
 def verify_file_operations(outputs: dict[str, Any]) -> ReviewResult:

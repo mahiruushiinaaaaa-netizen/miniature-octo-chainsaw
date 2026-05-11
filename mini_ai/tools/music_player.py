@@ -6,12 +6,27 @@ Improved with pygame audio, playlist, volume, and progress bar.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog
 from typing import Optional, List
-import pygame
+
+try:
+    import pygame
+except ImportError:
+    # Auto-install pygame if missing
+    print("Installing pygame...")
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pygame"], 
+                      timeout=60, check=True)
+        print("pygame installed.")
+        import pygame
+    except Exception as e:
+        print(f"ERROR: Failed to install pygame: {e}")
+        raise
 
 # Initialize pygame mixer
 pygame.mixer.init()

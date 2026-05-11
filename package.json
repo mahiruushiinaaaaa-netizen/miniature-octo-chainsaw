@@ -1,0 +1,8 @@
+{
+  "name": "mini_ai_v39-placeholder",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "echo \"No frontend build configured. Placeholder build succeeded.\""
+  }
+}

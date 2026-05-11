@@ -530,7 +530,11 @@ class MiniAIApp(tk.Tk):
 
             config = build_config(FakeArgs())
             if not config:
-                self.after(0, lambda: self._set_status("No model found — check Settings", error=True))
+                # Allow app to continue without model - user can change dir and settings
+                self._config = None
+                self._memory = PersistentMemory()
+                self.after(0, lambda: self._set_status("No model found — configure in Settings", warn=True))
+                self.after(0, lambda: self._append_system("No model loaded. You can still change workspace and configure settings."))
                 return
 
             self._config = config
@@ -850,6 +854,8 @@ class MiniAIApp(tk.Tk):
             if hasattr(self, 'ide'):
                 self.ide.pm = self._pm
                 self.ide._refresh_explorer()
+            # Try to reload config in case the new workspace has models
+            self.after(100, self._try_load_config)
 
     def _browse_models_dir(self):
         d = filedialog.askdirectory(initialdir=self._models_dir_var.get())

@@ -20,9 +20,9 @@ def load_memory() -> dict[str, Any]:
         if MEMORY_FILE.exists():
             return json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
     except Exception as e:
-        from .core import get_logger
+        from .logger import get_logger
         logger = get_logger("memory")
-        logger.warning(f"Failed to load memory from {MEMORY_FILE}: {e}. Starting with empty memory.")
+        logger.warn(f"Failed to load memory from {MEMORY_FILE}: {e}. Starting with empty memory.")
     return {"events": [], "projects": {}, "facts": [], "strategies": [], "learned_patterns": []}
 
 
@@ -147,11 +147,14 @@ class PersistentMemory:
     def context_for(self, text: str, limit: int = 1200) -> str:
         facts = self.data.get("facts", [])
         patterns = self.data.get("learned_patterns", [])
+        events = self.data.get("events", [])
         ctx_parts = []
         if facts:
             ctx_parts.append("Remembered facts:\n" + "\n".join(facts[-5:]))
         if patterns:
             ctx_parts.append("Learned Patterns:\n" + "\n".join([p.get("pattern", "") for p in patterns[-3:]]))
+        if events:
+            ctx_parts.append("Recent Events:\n" + "\n".join(events[-5:]))
             
         return "\n\n".join(ctx_parts)[-limit:]
 
