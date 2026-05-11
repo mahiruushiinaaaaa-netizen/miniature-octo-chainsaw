@@ -1,6 +1,13 @@
 """
 backend.py – Optimized backend with streaming, connection pooling, and smart caching.
 Low-end device friendly: minimal memory, fast timeout, reused connections.
+
+Integrates:
+- ConnectionPool for HTTP connection reuse with keep-alive
+- AdaptiveGrammarSelector for model-size-aware grammar selection
+- StreamingActionParser for early action detection during streaming
+- Pre-warm on server ready to initialize KV cache
+- 600s read timeout for CPU-only hardware
 """
 from __future__ import annotations
 
@@ -63,11 +70,52 @@ class _LRUCache:
 
 _GENERATION_CACHE = _LRUCache()
 
+
+# ── Connection pool and adaptive grammar singletons ───────────────────────────
+
+# These are lazily initialized per-config to avoid import-time side effects.
+_connection_pool = None  # type: Any
+_adaptive_grammar = None  # type: Any
+_pool_config_url = None  # Track which URL the pool was created for
+
+
+def _get_connection_pool(config: Config):
+    """Get or create the connection pool for the given config."""
+    global _connection_pool, _pool_config_url
+    if not config.streaming_parse:
+        return None
+    if _connection_pool is None or _pool_config_url != config.base_url:
+        from .connection_pool import create_pool_general
+        _connection_pool = create_pool_general(
+            config.base_url,
+            timeout=max(config.timeout, 600),
+        )
+        _pool_config_url = config.base_url
+        logger.info(f"Connection pool created for {config.base_url}")
+    return _connection_pool
+
+
+def _get_adaptive_grammar(config: Config):
+    """Get or create the adaptive grammar selector for the given config."""
+    global _adaptive_grammar
+    if not config.grammar_adaptive:
+        return None
+    if _adaptive_grammar is None:
+        from .adaptive_grammar import AdaptiveGrammarSelector
+        _adaptive_grammar = AdaptiveGrammarSelector(config)
+    return _adaptive_grammar
+
+
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 def http_get_json(url: str, timeout: int = 2):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        req = urllib.request.Request(
+            url,
+            headers={"Connection": "keep-alive"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             if 200 <= resp.status < 300:
                 raw = resp.read().decode("utf-8", errors="replace")
                 return json.loads(raw) if raw.strip() else {}
@@ -87,6 +135,53 @@ def http_post_json(url: str, payload: dict, timeout: int) -> dict:
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8", errors="replace")
         return json.loads(raw) if raw.strip() else {}
+
+
+def _pool_post_json(pool, path: str, payload: dict, timeout: int) -> dict:
+    """POST JSON using the connection pool instead of urllib directly."""
+    from .connection_pool import RetryableError
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Connection": "keep-alive",
+    }
+    conn = pool.get_connection(timeout=30)
+    try:
+        conn.request("POST", path, body=body, headers=headers)
+        response = conn.getresponse()
+        if response.status == 503:
+            response.read()  # Drain body before reuse
+            raise RetryableError(f"Server busy (503)", status_code=503)
+        raw = response.read().decode("utf-8", errors="replace")
+        return json.loads(raw) if raw.strip() else {}
+    except RetryableError:
+        pool.release(conn)
+        raise
+    except Exception:
+        # Connection may be broken, don't return to pool
+        try:
+            conn.close()
+        except Exception:
+            pass
+        # Decrement checked_out manually since we're not calling release
+        with pool._available_condition:
+            pool._checked_out = max(0, pool._checked_out - 1)
+            pool._available_condition.notify()
+        raise
+    else:
+        pool.release(conn)
+
+
+def _pool_post_json_safe(pool, path: str, payload: dict, timeout: int) -> dict:
+    """POST JSON using connection pool with retry policy for 503 responses."""
+    from .connection_pool import RetryPolicy, RetryableError
+
+    retry = RetryPolicy()
+
+    def do_request():
+        return _pool_post_json(pool, path, payload, timeout)
+
+    return retry.execute_with_retry(do_request)
 
 
 def server_ready(base_url: str) -> bool:
@@ -143,6 +238,8 @@ def start_server(config: Config):
             ok(f"Server ready [{config.role}]")
             logger.info(f"Server ready [{config.role}]", operation="server_start", duration_ms=elapsed)
             metrics.record_operation("server_start", elapsed, success=True)
+            # Pre-warm KV cache if connection pool is enabled
+            _pre_warm_on_ready(config)
             return proc
         time.sleep(0.25)
 
@@ -153,12 +250,76 @@ def start_server(config: Config):
     return None
 
 
+def _pre_warm_on_ready(config: Config) -> None:
+    """Pre-warm the KV cache after server reports ready.
+    
+    Sends a single request with empty prompt and n_predict=1 to initialize
+    the KV cache so subsequent requests start faster.
+    Only runs when streaming_parse (connection pool) is enabled.
+    """
+    pool = _get_connection_pool(config)
+    if pool is not None:
+        try:
+            pool.pre_warm()
+        except Exception as e:
+            logger.warn(f"Pre-warm failed (non-fatal): {e}")
+    else:
+        # Fallback: pre-warm via urllib if pool not enabled
+        try:
+            payload = {"prompt": "", "n_predict": 1, "temperature": 0.0, "cache_prompt": True}
+            http_post_json(config.base_url + "/completion", payload, timeout=30)
+            logger.info("KV cache pre-warmed via direct request")
+        except Exception as e:
+            logger.warn(f"Pre-warm failed (non-fatal): {e}")
+
+
+# ── Grammar selection helper ──────────────────────────────────────────────────
+
+def _select_grammar(config: Config, explicit_grammar: str | None) -> str | None:
+    """Select the appropriate grammar for a generation request.
+    
+    Priority:
+    1. Explicit grammar passed by caller (always used if provided)
+    2. Adaptive grammar selector (if grammar_adaptive is enabled)
+    3. None (no grammar enforcement)
+    """
+    if explicit_grammar is not None:
+        return explicit_grammar
+
+    selector = _get_adaptive_grammar(config)
+    if selector is not None:
+        return selector.select_grammar()
+
+    return None
+
+
+def _record_grammar_result(config: Config, content: str | None) -> None:
+    """Record success/failure with the adaptive grammar selector."""
+    selector = _get_adaptive_grammar(config)
+    if selector is None:
+        return
+
+    if content and content.strip():
+        selector.record_success()
+    else:
+        selector.record_empty_response()
+
+
 # ── Streaming completion ──────────────────────────────────────────────────────
 
 def completion_streaming(config: Config, prompt: str, max_tokens: int,
-                          system_text=None, on_token=None, grammar: str | None = None):
-    """Stream tokens from llama-server. Falls back to non-streaming if needed."""
+                          system_text=None, on_token=None, grammar: str | None = None,
+                          schema_registry: dict | None = None):
+    """Stream tokens from llama-server. Falls back to non-streaming if needed.
+    
+    When streaming_parse is enabled and a schema_registry is provided, tokens
+    are fed to a StreamingActionParser for early action detection. If a valid
+    action is detected mid-stream, the HTTP connection is closed to abort the
+    remaining generation.
+    """
     wrapped = build_chat_prompt(prompt, system_text)
+    effective_grammar = _select_grammar(config, grammar)
+    
     payload = {
         "prompt": wrapped,
         "n_predict": max_tokens,
@@ -167,22 +328,151 @@ def completion_streaming(config: Config, prompt: str, max_tokens: int,
         "stream": True,
         "cache_prompt": True,
     }
-    if grammar:
-        payload["grammar"] = grammar
+    if effective_grammar:
+        payload["grammar"] = effective_grammar
     if config.seed is not None:
         payload["seed"] = config.seed
+
+    # Determine read timeout: 600s for CPU-only hardware (Requirement 13.3)
+    read_timeout = max(config.timeout, 600)
+
+    # Set up streaming action parser if enabled
+    streaming_parser = None
+    if config.streaming_parse and schema_registry:
+        from .streaming import StreamingActionParser
+        streaming_parser = StreamingActionParser(schema_registry)
+
+    # Try connection pool first, fall back to urllib
+    pool = _get_connection_pool(config)
+    
+    if pool is not None:
+        result = _streaming_via_pool(
+            pool, config, payload, read_timeout, on_token, streaming_parser
+        )
+        if result is not None:
+            return result
+        # Pool streaming failed, fall back to urllib
+        logger.debug("Pool streaming failed, falling back to urllib")
+
+    # Fallback: stream via urllib (original behavior)
+    return _streaming_via_urllib(config, payload, read_timeout, on_token, streaming_parser)
+
+
+def _streaming_via_pool(pool, config: Config, payload: dict, timeout: int,
+                         on_token: Callable | None,
+                         streaming_parser) -> str | None:
+    """Stream tokens using the connection pool. Returns None on failure."""
+    from .streaming import ParseEvent
+    
+    conn = None
+    try:
+        conn = pool.get_connection(timeout=30)
+        body = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Connection": "keep-alive",
+        }
+        conn.request("POST", "/completion", body=body, headers=headers)
+        response = conn.getresponse()
+
+        if response.status != 200:
+            # Read body and release connection
+            response.read()
+            pool.release(conn)
+            conn = None
+            return None
+
+        chunks = []
+        early_action = None
+
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload_str = line[5:].strip()
+            if payload_str == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload_str)
+            except json.JSONDecodeError:
+                continue
+            token = obj.get("content", "")
+            if token:
+                chunks.append(token)
+                if on_token:
+                    on_token(token)
+                # Feed to streaming parser for early action detection
+                if streaming_parser is not None:
+                    event = streaming_parser.feed(token)
+                    if event == ParseEvent.ACTION_READY:
+                        early_action = streaming_parser.get_action()
+                        logger.info(
+                            "Early action detected via streaming parser, "
+                            "closing connection to abort remaining stream"
+                        )
+                        # Close connection to abort remaining stream (Req 10.3)
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        # Don't release back to pool - it's closed
+                        with pool._available_condition:
+                            pool._checked_out = max(0, pool._checked_out - 1)
+                            pool._available_condition.notify()
+                        conn = None
+                        break
+            if obj.get("stop"):
+                break
+
+        # Release connection if still held
+        if conn is not None:
+            pool.release(conn)
+            conn = None
+
+        # If early action was detected, return the raw JSON for the caller
+        if early_action is not None:
+            # Return the JSON string so the agent loop can use it directly
+            return json.dumps(early_action)
+
+        # Finish streaming parser
+        if streaming_parser is not None:
+            streaming_parser.finish()
+
+        result = clean_model_output("".join(chunks))
+        return result if result else None
+
+    except Exception as e:
+        logger.debug(f"Pool streaming error: {e}")
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            with pool._available_condition:
+                pool._checked_out = max(0, pool._checked_out - 1)
+                pool._available_condition.notify()
+        return None
+
+
+def _streaming_via_urllib(config: Config, payload: dict, timeout: int,
+                           on_token: Callable | None,
+                           streaming_parser) -> str | None:
+    """Stream tokens via urllib (original behavior with streaming parser support)."""
+    from .streaming import ParseEvent
 
     url = config.base_url + "/completion"
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Connection": "keep-alive"},
         method="POST",
     )
 
     try:
         chunks = []
-        with urllib.request.urlopen(req, timeout=max(config.timeout, 600)) as resp:
+        early_action = None
+
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             for raw_line in resp:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data:"):
@@ -199,47 +489,77 @@ def completion_streaming(config: Config, prompt: str, max_tokens: int,
                     chunks.append(token)
                     if on_token:
                         on_token(token)
+                    # Feed to streaming parser for early action detection
+                    if streaming_parser is not None:
+                        event = streaming_parser.feed(token)
+                        if event == ParseEvent.ACTION_READY:
+                            early_action = streaming_parser.get_action()
+                            logger.info(
+                                "Early action detected via streaming parser, "
+                                "closing HTTP connection to abort stream"
+                            )
+                            # Close the connection to abort remaining stream (Req 10.3)
+                            break
                 if obj.get("stop"):
                     break
+
+        # If early action was detected, return the raw JSON
+        if early_action is not None:
+            return json.dumps(early_action)
+
+        # Finish streaming parser
+        if streaming_parser is not None:
+            streaming_parser.finish()
+
         result = clean_model_output("".join(chunks))
         return result if result else None
     except Exception:
-        return completion_from_server(config, prompt, max_tokens, system_text)
+        return completion_from_server(config, prompt=None, max_tokens=0, system_text=None,
+                                      _payload_override=payload)
 
 
-def completion_from_server(config: Config, prompt: str, max_tokens: int, system_text=None, grammar: str | None = None):
-    wrapped = build_chat_prompt(prompt, system_text)
-    payload = {
-        "prompt": wrapped,
-        "n_predict": max_tokens,
-        "temperature": config.temp,
-        "stop": ["<|im_end|>", "<|endoftext|>", "<|im_start|>user"],
-        "cache_prompt": True,
-    }
-    if grammar:
-        payload["grammar"] = grammar
-    if config.seed is not None:
-        payload["seed"] = config.seed
+def completion_from_server(config: Config, prompt: str | None, max_tokens: int,
+                           system_text=None, grammar: str | None = None,
+                           _payload_override: dict | None = None):
+    """Non-streaming completion from llama-server.
+    
+    Uses connection pool with retry policy when available, falls back to urllib.
+    """
+    if _payload_override is not None:
+        # Used by streaming fallback - payload already built
+        payload = dict(_payload_override)
+        payload.pop("stream", None)
+    else:
+        wrapped = build_chat_prompt(prompt, system_text)
+        effective_grammar = _select_grammar(config, grammar)
+        payload = {
+            "prompt": wrapped,
+            "n_predict": max_tokens,
+            "temperature": config.temp,
+            "stop": ["<|im_end|>", "<|endoftext|>", "<|im_start|>user"],
+            "cache_prompt": True,
+        }
+        if effective_grammar:
+            payload["grammar"] = effective_grammar
+        if config.seed is not None:
+            payload["seed"] = config.seed
 
+    # Read timeout: 600s for CPU-only hardware (Requirement 13.3)
+    read_timeout = max(config.timeout, 600)
     url = config.base_url + "/completion"
-    try:
-        data = http_post_json(url, payload, timeout=max(config.timeout, 600))
-    except Exception as exc:
+
+    # Try connection pool with retry first
+    pool = _get_connection_pool(config)
+    if pool is not None:
         try:
-            minimal = {"prompt": wrapped, "n_predict": max_tokens, "temperature": config.temp}
-            data = http_post_json(url, minimal, timeout=max(config.timeout, 600))
-        except Exception as exc2:
-            raise NetworkError(
-                f"Server request failed: {exc2}",
-                url=url,
-                context=ErrorContext(
-                    operation="completion",
-                    resource=url,
-                    recoverable=True,
-                    suggested_action="Ensure llama-server is running and reachable, then retry",
-                ),
-                cause=exc2,
-            ) from exc2
+            data = _pool_post_json_safe(pool, "/completion", payload, read_timeout)
+        except Exception as pool_exc:
+            logger.debug(f"Pool request failed, falling back to urllib: {pool_exc}")
+            # Try reconnection if connection was lost
+            _try_reconnect(config)
+            data = _urllib_post_with_fallback(config, url, payload, read_timeout)
+    else:
+        data = _urllib_post_with_fallback(config, url, payload, read_timeout)
 
     content = data.get("content") or data.get("response")
     if not isinstance(content, str) or not content.strip():
@@ -262,6 +582,52 @@ def completion_from_server(config: Config, prompt: str, max_tokens: int, system_
         )
     
     return clean_model_output(content)
+
+
+def _urllib_post_with_fallback(config: Config, url: str, payload: dict, timeout: int) -> dict:
+    """POST via urllib with minimal-payload fallback on failure."""
+    try:
+        data = http_post_json(url, payload, timeout=timeout)
+    except Exception as exc:
+        try:
+            # Minimal fallback: strip grammar and extra fields
+            wrapped = payload.get("prompt", "")
+            minimal = {
+                "prompt": wrapped,
+                "n_predict": payload.get("n_predict", 128),
+                "temperature": payload.get("temperature", config.temp),
+            }
+            data = http_post_json(url, minimal, timeout=timeout)
+        except Exception as exc2:
+            raise NetworkError(
+                f"Server request failed: {exc2}",
+                url=url,
+                context=ErrorContext(
+                    operation="completion",
+                    resource=url,
+                    recoverable=True,
+                    suggested_action="Ensure llama-server is running and reachable, then retry",
+                ),
+                cause=exc2,
+            ) from exc2
+    return data
+
+
+def _try_reconnect(config: Config) -> None:
+    """Attempt reconnection using ReconnectionManager on connection loss."""
+    try:
+        from .connection_pool import ReconnectionManager
+        manager = ReconnectionManager(
+            poll_interval=5,
+            max_wait=config.reconnect_timeout,
+        )
+        health_url = config.base_url + "/health"
+        if manager.wait_for_server(health_url):
+            logger.info("Server reconnected successfully")
+        else:
+            logger.warn("Server reconnection timed out")
+    except Exception as e:
+        logger.debug(f"Reconnection attempt error: {e}")
 
 
 def get_embeddings(config: Config, text: str, timeout: int = 60) -> list[float]:
@@ -292,13 +658,33 @@ def get_embeddings(config: Config, text: str, timeout: int = 60) -> list[float]:
 # ── Main generate entrypoint ──────────────────────────────────────────────────
 
 def generate(config: Config, prompt: str, max_tokens: int = 128,
-             system_text=None, use_cache: bool = True, on_token=None, grammar: str | None = None):
-    cache_key = (str(config.model), system_text or "", prompt, int(max_tokens), float(config.temp), grammar or "")
+             system_text=None, use_cache: bool = True, on_token=None,
+             grammar: str | None = None, schema_registry: dict | None = None):
+    """Generate text from llama-server with caching, streaming, and adaptive grammar.
+    
+    Args:
+        config: Backend configuration.
+        prompt: The user/agent prompt text.
+        max_tokens: Maximum tokens to generate.
+        system_text: Optional system prompt text.
+        use_cache: Whether to use the generation cache.
+        on_token: Callback for streaming tokens.
+        grammar: Explicit grammar override (bypasses adaptive selection).
+        schema_registry: Tool schema registry for streaming action detection.
+                        When provided with streaming_parse=True, enables early
+                        action detection via StreamingActionParser.
+    """
+    # Resolve effective grammar for cache key
+    effective_grammar = _select_grammar(config, grammar)
+    cache_key = (str(config.model), system_text or "", prompt, int(max_tokens),
+                 float(config.temp), effective_grammar or "")
     
     logger.debug("Generation request", operation="generate", context={
         "model": str(config.model),
         "max_tokens": max_tokens,
         "use_cache": use_cache,
+        "grammar_adaptive": config.grammar_adaptive,
+        "streaming_parse": config.streaming_parse,
     })
 
     if use_cache:
@@ -315,10 +701,16 @@ def generate(config: Config, prompt: str, max_tokens: int = 128,
     started = time.perf_counter()
     
     try:
-        if on_token:
-            content = completion_streaming(config, prompt, max_tokens, system_text, on_token=on_token, grammar=grammar)
+        if on_token or (config.streaming_parse and schema_registry):
+            content = completion_streaming(
+                config, prompt, max_tokens, system_text,
+                on_token=on_token, grammar=grammar,
+                schema_registry=schema_registry,
+            )
         else:
-            content = completion_from_server(config, prompt, max_tokens, system_text, grammar=grammar)
+            content = completion_from_server(
+                config, prompt, max_tokens, system_text, grammar=grammar,
+            )
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
         logger.error("Generation failed", operation="generate", duration_ms=elapsed, error=exc)
@@ -326,6 +718,9 @@ def generate(config: Config, prompt: str, max_tokens: int = 128,
         raise
 
     elapsed = (time.perf_counter() - started) * 1000
+
+    # Record result with adaptive grammar selector
+    _record_grammar_result(config, content)
 
     if content:
         if use_cache:
@@ -341,3 +736,13 @@ def generate(config: Config, prompt: str, max_tokens: int = 128,
     logger.warn("Generation returned empty content", operation="generate", duration_ms=elapsed)
     metrics.record_operation("generate", elapsed, success=False)
     return None
+
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+
+def close_pool() -> None:
+    """Close the connection pool. Call on shutdown."""
+    global _connection_pool
+    if _connection_pool is not None:
+        _connection_pool.close_all()
+        _connection_pool = None

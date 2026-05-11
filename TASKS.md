@@ -1,4 +1,154 @@
 #### Done (Latest)
+- **Batch Executor**: Created `mini_ai/core/batch.py` with `BatchExecutor` class for parallel file operations:
+  - `BatchExecutor` class with `MAX_BATCH_SIZE=50`, `MAX_WORKERS=4`
+  - `batch_read(paths, pm)`: Concurrent file reads using `ThreadPoolExecutor`, per-file failure isolation
+  - `batch_write(files, writer)`: Concurrent file writes via `SafeFileWriter`, per-file status tracking
+  - `FileResult` dataclass: path, success, content (reads), error (failures), size
+  - `BatchResult` dataclass: succeeded/failed lists, duration_ms, summary property, total count
+  - Rejects batches > 50 with clear `ValueError` message
+  - Per-file failures handled independently (no abort on single failure)
+  - Consolidated result with per-file status and summary counts
+  - Requirements: 3.1, 3.2, 3.3, 3.4, 3.5
+
+- **Tool Calling Reliability Pipeline**: Created `mini_ai/core/tool_reliability.py` with four classes for robust tool calling:
+  - `LoopDetector`: Sliding window (size 10) loop detection. Records (tool, params) tuples and triggers when same tuple appears ≥3 times in window. Uses canonical JSON key for consistent comparison. (Req 8.3, 8.4)
+  - `ToolDisabler`: Per-session tool enable/disable based on failure counts. Disables after 3 consecutive failures, re-enables on explicit valid call (record_success). Required category protection: re-enables least-recently-disabled tool if all tools in filesystem/execution/output category become disabled. (Req 8.6, 8.7)
+  - `RecoverySuggester`: Maps error categories to concrete recovery suggestions. Covers file-not-found, permission-denied, timeout, invalid-input, syntax-error, connection-error, batch-limit. Auto-classifies errors via pattern matching. (Req 8.5)
+  - `SchemaValidator`: Validates tool actions against ToolSchema registry producing structured `ValidationResult` with per-parameter errors (missing/wrong_type), expected types, and auto-generated usage examples. (Req 8.1, 8.2)
+  - Added `ValidationError` and `ValidationResult` dataclasses for structured error reporting
+  - Added `ToolRecord` dataclass for per-tool failure state tracking
+  - Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7
+
+- **Adaptive Grammar Selector**: Created `mini_ai/core/adaptive_grammar.py` with `AdaptiveGrammarSelector` class:
+  - `_detect_model_size(model_path)`: Extracts parameter count from GGUF filename using regex pattern matching (e.g., "3B" → 3.0, "0.5B" → 0.5). Defaults to 3.0 (< 7B) if no pattern found or model path is None.
+  - `select_grammar()`: Returns `THINK_JSON_GRAMMAR` for < 7B models, `JSON_ACTION_GRAMMAR` for ≥ 7B, or `None` if grammar disabled
+  - `record_empty_response()`: Tracks consecutive empty responses, disables grammar after 2 consecutive empties
+  - `record_success()`: Resets empty response counter on successful (non-empty) model output
+  - Imports grammar constants from `mini_ai/core/grammars.py`
+  - Requirements: 7.1, 7.2, 7.3, 7.4, 7.5
+
+- **MULTI_ACTION_GRAMMAR**: Added `MULTI_ACTION_GRAMMAR` constant to `mini_ai/core/grammars.py`:
+  - Supports both single-action `{"plan": ..., "action": ...}` and multi-action `{"plan": ..., "actions": [...]}` formats
+  - Backward compatible with existing grammars (optional `<think>` block prefix)
+  - Includes `depends_on` field support in action objects (integer array referencing action indices)
+  - Dedicated `action_field` rule distinguishing `depends_on` from generic key-value fields
+  - Same tool_name set as existing grammars for consistency
+  - Requirements: 9.5
+
+- **Token Budget Manager**: Extended `mini_ai/core/prompting.py` with `TokenBudgetManager` class and `PromptSection` dataclass:
+  - `CHAR_TO_TOKEN_RATIO = 4` for token estimation
+  - Budget calculation: `min(ctx_size - 1096, 3000)` for ctx ≤ 4096, else `ctx_size - 1096`
+  - `PromptSection` dataclass with name, content, priority, mandatory, max_tokens
+  - `add_section()`: Adds labeled prompt sections with priority metadata
+  - `build()`: Assembles prompt within budget using priority-based trimming
+  - `estimate_tokens(text)`: Returns `len(text) // 4`
+  - Raises `ValueError` if mandatory sections alone exceed budget
+  - Repo map BM25 filtering: truncates to entries with score > 1.5 when repo map > 400 tokens
+  - Observation summarization: single-line format for all but 3 most recent when history > 2000 chars
+  - Drops repo map entirely as last resort with logged warning
+  - Trimming order: repo_map (priority 3) → context (priority 2) → history (priority 1)
+  - Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6
+
+- **Structured Communication Protocol**: Extended `mini_ai/core/communication.py` with three new classes for structured model communication:
+  - `StructuredPromptFormatter`: Formats prompt sections with labeled delimiters [GOAL], [HISTORY], [CONTEXT], [TOOLS], [MEMORY], [REPO_MAP]. Mandatory sections ([GOAL], [TOOLS]) always included even if empty. Canonical ordering with support for extra sections. (Req 6.1)
+  - `ResponseValidator`: Validates model JSON responses for parseable JSON with valid "action" key matching registered tool names. Tracks consecutive failures, provides nudge messages with JSON schema + concrete example, supports retry logic (simplify prompt after 3 failures, abort after 4). (Req 6.2, 6.3, 6.4, 6.5)
+  - `ToolSuccessTracker`: Tracks per-session tool success/failure counts. Recommends top 3 tools with ≥5 invocations ordered by success-to-total ratio. Provides formatted hint string for system prompt. (Req 6.6)
+  - Added `ToolSuccessRecord` dataclass, `SECTION_LABELS` and `MANDATORY_SECTIONS` constants
+  - All existing code preserved (appended new classes at end of file)
+  - Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6
+
+- **Streaming Response Parser**: Created `mini_ai/core/streaming.py` with `StreamingActionParser` class for early JSON action detection:
+  - `ParseEvent` enum: BUFFERING, ACTION_READY, INVALID_CANDIDATE, STREAM_END
+  - `StreamingActionParser` class with brace-depth counter, string-state tracking, and buffer
+  - `feed(token)`: Tracks brace depth character-by-character, handles escaped quotes and braces inside strings
+  - Attempts JSON parse at each brace-depth-zero boundary
+  - Validates parsed JSON against ToolSchema registry (checks "action" key matches registered tool, validates params)
+  - Discards invalid candidates (bad JSON, unknown tool, failed schema validation) and continues buffering
+  - `finish()`: Signals stream end, tries full-buffer parse as fallback, returns STREAM_END if no valid action found
+  - `get_action()`: Returns the validated action dict when ACTION_READY
+  - `get_reasoning_text()`: Returns full buffer as plain text when stream ends without valid action
+  - `reset()`: Resets parser state for reuse
+  - Requirements: 10.1, 10.2, 10.4, 10.5
+
+- **Observation Compressor**: Added `ObservationCompressor` class to `mini_ai/core/communication.py`:
+  - `compress(tool, output, success)`: Compresses outputs > 1000 chars to ≤ 500 chars using key info extraction (Req 12.1, 12.6)
+  - Structured template format: `[TOOL_NAME] STATUS: success/fail | KEY_INFO: extracted_data` (Req 12.2)
+  - `run_cmd` special handling: keeps first 200 + last 500 chars with `... [N characters truncated] ...` for outputs > 2000 chars (Req 12.3)
+  - `deduplicate(observations)`: Replaces consecutive identical observations with `[repeated N times]` (Req 12.4)
+  - `summarize_old(observations, budget_chars)`: Summarizes observations older than 3 turns into ≤ 200 char progress line when history > 60% of context budget (Req 12.5)
+  - Key info extraction uses regex patterns for errors, file paths, line numbers
+  - Progress summary extracts tool names and status from structured template format
+  - Tests: 19 unit tests in `tests/test_observation_compressor.py` (all passing)
+  - Requirements: 12.1, 12.2, 12.3, 12.4, 12.5, 12.6
+
+- **Workspace Index Incremental Rebuild**: Extended `mini_ai/core/workspace_index.py` with `WorkspaceIndexManager` class:
+  - Integrates `DependencyGraph` and `FileChangeTracker` into workspace index workflow
+  - `initialize()`: Builds/loads index and wires up dep_graph + change_tracker
+  - `rebuild_incremental()`: Processes only changed-mtime files, removes deleted file entries, re-indexes affected files + direct importers
+  - `lookup_function(name)`: Returns `FunctionLookupResult` with file, start_line, end_line, callers (supports qualified and unqualified names)
+  - `get_callers(function_name)`: Returns list of callers within indexed workspace
+  - `invalidate_file(rel_path)`: Invalidates cache for file + direct dependents, removes stale function mappings
+  - `add_function_mapping()`: Manual function-to-file mapping with line numbers
+  - Returns `FunctionLookupResult(found=False)` with empty fields for non-existent function names
+  - Added `FunctionLookupResult` dataclass for structured lookup results
+  - Cleaned up redundant local logger imports (now uses module-level logger)
+  - Requirements: 4.2, 4.3, 4.4, 4.5, 4.6, 4.7
+  - Tests: 21 unit tests in `tests/test_workspace_index_manager.py` (all passing)
+
+- **Enhanced Repo Map v2**: Extended `mini_ai/tools/repomap.py` with cross-reference support:
+  - `classify_file_role(path, signatures)`: Assigns exactly one role from closed set {entry_point, utility, model, controller, test, config, unknown} based on path patterns and signature heuristics
+  - `generate_repo_map_v2(root, goal, dep_graph, max_tokens)`: Goal-focused repo map with import edges, role annotations, and dependency-hop filtering
+  - Filters to files within 2 dependency hops of highest-relevance file using DependencyGraph BFS
+  - Falls back to entry_point files + 1 hop when no file scores above relevance threshold of 5
+  - Handles syntax-error files gracefully (includes with role + [syntax-error] tag + partial edges)
+  - Enforces max 400 tokens (1600 chars) with BM25 filtering above 1.5 threshold
+  - BM25 scoring uses standard k1=1.5, b=0.75 parameters with IDF weighting
+  - Existing `generate_repo_map()` preserved for backward compatibility
+  - Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6
+
+- **Dependency Graph**: Created `mini_ai/core/dep_graph.py` with `DependencyGraph` class for workspace intelligence:
+  - `FunctionInfo` dataclass with file, name, start_line, end_line, callers
+  - `build_from_index(workspace_index)`: Parses Python (from X import Y, import X) and JS/TS (import from, require()) statements from indexed files
+  - `invalidate(changed_file)`: Returns `{file} ∪ {direct importers}` (one hop only)
+  - `get_function_info(name)`: Returns FunctionInfo with file, lines, callers (supports qualified and unqualified lookup)
+  - `files_within_hops(start, max_hops=2)`: BFS traversal over both forward and reverse edges
+  - Builds forward (`_imports`) and reverse (`_importers`) maps
+  - Resolves Python module paths (dot notation to file paths, relative imports)
+  - Resolves JS/TS paths (relative imports, extension resolution, index files)
+  - Requirements: 4.1, 4.2, 4.3, 4.4, 4.5
+
+- **File Change Tracker**: Created `mini_ai/core/change_tracker.py` with `FileChangeTracker` class for session-based file modification tracking:
+  - Uses `os.path.getmtime()` for efficient mtime comparison without full directory re-scans
+  - `check_file(path)`: Compares stored vs disk mtime, returns True if changed, caches new mtime
+  - `record_write(path)`: Updates mtime cache after executor writes a file
+  - `get_modified_files()`: Returns max 50 most recent modified file paths (relative)
+  - `should_reindex()`: Returns True when >20 files modified, triggering incremental re-index
+  - `get_files_for_reindex(dep_graph)`: Returns modified files + direct importers from dependency graph
+  - Handles cache update failures by invalidating entry and logging warning
+  - Stores relative paths (forward-slash normalized) for cross-platform consistency
+  - Requirements: 14.1, 14.2, 14.3, 14.5, 14.6, 14.7
+
+- **Connection Pool**: Created `mini_ai/core/connection_pool.py` with three classes for optimized HTTP communication:
+  - `ConnectionPool`: Thread-safe HTTP connection pool with configurable max connections (2 for agent, 4 general), keep-alive support, queuing when exhausted, and KV cache pre-warming via `pre_warm()`
+  - `RetryPolicy`: Exponential backoff (1s, 2s, 4s) for 503 responses with max 3 retries, plus `RetryableError` exception class
+  - `ReconnectionManager`: Polls health endpoint every 5s for up to 60s on connection loss
+  - Factory helpers: `create_pool_for_agent()` (max 2) and `create_pool_general()` (max 4)
+  - Uses stdlib `http.client` consistent with existing backend, thread-safe with `threading.Condition`
+
+- **Lazy Module Loader**: Created `mini_ai/core/lazy_loader.py` with `LazyModule` class for deferred imports:
+  - `__getattr__` proxy defers `importlib.import_module` until first attribute access
+  - Tracks load time in `_load_time_ms`, logs WARNING if > 200ms
+  - Handles import failures gracefully: logs WARNING, raises `AttributeError` on subsequent access
+  - Updated `mini_ai/agents/agent.py` to use `LazyModule` for psutil, health_monitor, and rag imports
+  - Reduces startup time by deferring heavy module loading until actually needed
+
+- **Performance Config Fields**: Extended `Config` dataclass in `mini_ai/core/config.py` with 10 performance optimization fields:
+  - `lazy_loading` (bool, default True), `token_budget_strict` (bool, default True), `batch_max_workers` (int, default 4)
+  - `streaming_parse` (bool, default True), `grammar_adaptive` (bool, default True), `tool_routing` (bool, default True)
+  - `self_healing` (bool, default True), `max_tools_per_turn` (int, default 8), `connection_pool_size` (int, default 4), `reconnect_timeout` (int, default 60)
+  - All fields have sensible defaults, backward compatible with existing config loading
+
+#### Done
 - **Batch File Operations**: Added efficient bulk file operations for improved performance:
   - `batch_read_files`: Read multiple files in a single operation
   - `batch_delete_files`: Delete multiple files/directories at once
@@ -83,9 +233,35 @@
 - **Fixed Conversation Memory**: Resolved a bug where recent events were missing from AI context.
 
 #### Next
+- **Performance Optimization**: Continue with task 8.4 (Property tests for batch executor) and remaining execution/integration tasks
 - **Workspace Explorer Sidebar**: Port the sidebar concept to a toggleable panel rather than a fixed dual-pane.
 
 #### Done (Latest)
+- **Multi-Action Executor**: Created `mini_ai/core/multi_action.py` with `MultiActionExecutor` class for batch action execution with dependency resolution:
+  - `MAX_BATCH_SIZE = 10`: Rejects batches > 10 with clear error message (Req 9.7)
+  - `_validate_dependencies()`: Checks for out-of-range indices, self-references, non-int deps, and circular dependencies using DFS cycle detection (Req 9.3)
+  - `_topological_sort()`: Returns execution layers using Kahn's algorithm (BFS). Actions within a layer run in parallel, layers execute sequentially (Req 9.1, 9.2)
+  - `execute_batch()`: Runs independent actions in parallel (ThreadPoolExecutor, max 4 workers), dependent actions sequentially after deps complete (Req 9.1)
+  - `_get_transitive_dependents()`: BFS to find all actions transitively depending on a failed action
+  - Failure propagation: Cancels all transitive dependents on action failure, continues independent actions (Req 9.6)
+  - `ActionResult` dataclass: index, tool, success, output, cancelled fields
+  - `BatchActionResult` dataclass: per-index results dict + cancelled list + summary property (Req 9.4)
+  - Requirements: 9.1, 9.2, 9.3, 9.4, 9.6, 9.7
+
+- **Self-Healing JSON Parser**: Created `mini_ai/core/self_healing.py` with `SelfHealingParser` class for automatic JSON repair from small model outputs:
+  - `_fix_single_quotes()`: Character-by-character replacement of single quotes with double quotes, handles mixed-quote scenarios
+  - `_fix_backslashes()`: Escapes unescaped Windows backslashes in JSON string values (e.g., `C:\Users\...` → `C:\\Users\\...`)
+  - `_fix_trailing_commas()`: Removes trailing commas before `}` or `]`
+  - `_fix_tool_name()`: Levenshtein distance ≤ 2 correction to exactly one valid tool; rejects ambiguous matches with candidate list
+  - `parse(raw)`: Repair pipeline (single quotes → backslashes → trailing commas → re-parse, 1 attempt). Strips `<think>` blocks before parsing.
+  - Extra fields not in tool schema are preserved in parsed dict (ignored during execution by executor)
+  - `_correction_log` (Counter) tracks error types per session
+  - `get_session_hints(min_count=2, top_k=3)`: Returns formatted hints for system prompt based on frequent corrections
+  - Returns error with corrective example (tool-specific or generic) if repair fails
+  - `reset()`: Clears correction log for new session
+  - Pure Python Levenshtein implementation (no external dependencies)
+  - Requirements: 15.1, 15.2, 15.3, 15.4, 15.5, 15.6, 15.7
+
 - **RAG for Command Persistence**: Implemented command memory system to help agent remember successful patterns:
   - Created `command_memory.py` with `CommandMemory` class for storing/retrieving command patterns
   - Records command, cwd, exit code, timestamp, and context for each execution

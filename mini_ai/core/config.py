@@ -63,6 +63,18 @@ class Config:
     coder_config: Config | None = None # For tri-model
     sandbox_type: str = "local" # options: "local", "venv", "docker"
     
+    # Performance optimization fields
+    lazy_loading: bool = True
+    token_budget_strict: bool = True  # Enforce hard token limits
+    batch_max_workers: int = 4
+    streaming_parse: bool = True
+    grammar_adaptive: bool = True
+    tool_routing: bool = True
+    self_healing: bool = True
+    max_tools_per_turn: int = 8
+    connection_pool_size: int = 4
+    reconnect_timeout: int = 60
+    
     def __post_init__(self):
         """Resolve paths after initialization."""
         if self.model:

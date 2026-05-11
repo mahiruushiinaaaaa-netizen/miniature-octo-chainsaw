@@ -29,6 +29,13 @@ from .coder import find_blocks
 from ..core.executor import ToolExecutor
 from ..core.communication import compact_observation, get_intelligent_hint, format_tool_for_ai
 
+# Lazy-loaded heavy modules (deferred until first use to reduce startup time)
+from ..core.lazy_loader import LazyModule
+
+psutil = LazyModule("psutil")
+health_monitor = LazyModule(".health_monitor", package="mini_ai.core")
+rag_module = LazyModule(".rag", package="mini_ai.core")
+
 
 
 @dataclass
