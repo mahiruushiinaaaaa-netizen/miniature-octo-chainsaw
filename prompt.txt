@@ -1,0 +1,1 @@
+create a plan to make this system and my ai model communicate properly and do tasks well cause right now it cant do tasks and hallucinates paths i need ui upgrades too in which the command prompt it opens should be live and i can see what its doind in short create a all around prompt to improve this
