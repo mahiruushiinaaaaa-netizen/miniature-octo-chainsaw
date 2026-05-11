@@ -739,6 +739,177 @@ class ToolExecutor:
         except Exception as e:
             return False, self.result(False, str(e))
 
+    def tool_batch_read_files(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        """Batch read multiple files efficiently - optimized version of read_files for bulk operations."""
+        files_raw = action.get("files", [])
+        files = [str(f) for f in files_raw] if isinstance(files_raw, list) else [str(files_raw)]
+
+        if not files:
+            return False, self.result(False, "No files specified for batch read")
+
+        chunks = []
+        read_paths = []
+        failed_paths = []
+        total_bytes = 0
+
+        for f in files:
+            exists, path, suggestions = self.pm.verify_path_exists(f)
+            if not exists:
+                error_msg = f"{f} (not found)"
+                if suggestions:
+                    error_msg += f" - Suggestions: {', '.join(suggestions[:2])}"
+                failed_paths.append(error_msg)
+                continue
+
+            try:
+                from ..tools.file_ops import is_probably_text
+                if not is_probably_text(path):
+                    failed_paths.append(f"{f} (binary or non-text)")
+                    continue
+
+                stat = path.stat()
+                size = stat.st_size
+
+                if size > _MAX_READ_BYTES:
+                    with path.open("rb") as handle:
+                        raw = handle.read(_MAX_READ_BYTES)
+                    content = raw.decode("utf-8", errors="replace") + "\n...[truncated]"
+                else:
+                    content = path.read_text(encoding="utf-8", errors="replace")
+
+                total_bytes += min(size, _MAX_READ_BYTES)
+                chunks.append(f"\n--- FILE: {f} ---\n{content[:12000]}")
+                read_paths.append(str(path))
+
+            except Exception as e:
+                failed_paths.append(f"{f} ({str(e)})")
+
+        summary = f"Batch read: {len(read_paths)} succeeded, {len(failed_paths)} failed, {total_bytes} bytes"
+        return False, self.result(True, "".join(chunks), read=read_paths, failed=failed_paths, summary=summary)
+
+    def tool_batch_delete_files(self, action: dict[str, Any], ay: bool) -> tuple[bool, str]:
+        """Batch delete multiple files or directories."""
+        paths_raw = action.get("paths", [])
+        paths = [str(p) for p in paths_raw] if isinstance(paths_raw, list) else [str(paths_raw)]
+
+        if not paths:
+            return False, self.result(False, "No paths specified for batch delete")
+
+        deleted = []
+        failed = []
+        skipped = []
+
+        for p in paths:
+            target = self.pm.resolve_target(p)
+
+            if not target.exists():
+                skipped.append(f"{p} (not found)")
+                continue
+
+            ok_write, reason = self.pm.validate_write_path(target)
+            if not ok_write:
+                failed.append(f"{p}: {reason}")
+                continue
+
+            if not ay and not should_auto_approve(destructive=True):
+                if not confirm(f"Delete {p}?"):
+                    skipped.append(f"{p} (user cancelled)")
+                    continue
+
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                deleted.append(p)
+            except Exception as e:
+                failed.append(f"{p}: {str(e)}")
+
+        all_ok = len(failed) == 0
+        summary = f"Batch delete: {len(deleted)} deleted, {len(failed)} failed, {len(skipped)} skipped"
+        return False, self.result(all_ok, summary, deleted=deleted, failed=failed, skipped=skipped)
+
+    def tool_batch_copy_paths(self, action: dict[str, Any], ay: bool) -> tuple[bool, str]:
+        """Batch copy multiple files or directories."""
+        operations = action.get("operations", [])
+        if not operations:
+            return False, self.result(False, "No operations specified for batch copy")
+
+        copied = []
+        failed = []
+        skipped = []
+
+        for op in operations:
+            src = self.pm.resolve_target(str(op.get("src", "")))
+            dst = self.pm.resolve_target(str(op.get("dst", "")))
+
+            if not src.exists():
+                failed.append(f"{op}: Source not found")
+                continue
+
+            ok_write, reason = self.pm.validate_write_path(dst)
+            if not ok_write:
+                failed.append(f"{op}: {reason}")
+                continue
+
+            if dst.exists() and not ay and not should_auto_approve(destructive=True):
+                if not confirm(f"Copy {src} to {dst}?"):
+                    skipped.append(f"{src} -> {dst} (user cancelled)")
+                    continue
+
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if src.is_dir():
+                    shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+                else:
+                    shutil.copy2(str(src), str(dst))
+                copied.append(f"{src} -> {dst}")
+            except Exception as e:
+                failed.append(f"{src} -> {dst}: {str(e)}")
+
+        all_ok = len(failed) == 0
+        summary = f"Batch copy: {len(copied)} copied, {len(failed)} failed, {len(skipped)} skipped"
+        return False, self.result(all_ok, summary, copied=copied, failed=failed, skipped=skipped)
+
+    def tool_batch_move_paths(self, action: dict[str, Any], ay: bool) -> tuple[bool, str]:
+        """Batch move/rename multiple files or directories."""
+        operations = action.get("operations", [])
+        if not operations:
+            return False, self.result(False, "No operations specified for batch move")
+
+        moved = []
+        failed = []
+        skipped = []
+
+        for op in operations:
+            src = self.pm.resolve_target(str(op.get("src", "")))
+            dst = self.pm.resolve_target(str(op.get("dst", "")))
+
+            if not src.exists():
+                failed.append(f"{op}: Source not found")
+                continue
+
+            ok_write, reason = self.pm.validate_write_path(dst)
+            if not ok_write:
+                failed.append(f"{op}: {reason}")
+                continue
+
+            if not ay and not should_auto_approve(destructive=True):
+                if not confirm(f"Move {src} to {dst}?"):
+                    skipped.append(f"{src} -> {dst} (user cancelled)")
+                    continue
+
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                moved.append(f"{src} -> {dst}")
+            except Exception as e:
+                failed.append(f"{src} -> {dst}: {str(e)}")
+
+        all_ok = len(failed) == 0
+        summary = f"Batch move: {len(moved)} moved, {len(failed)} failed, {len(skipped)} skipped"
+        return False, self.result(all_ok, summary, moved=moved, failed=failed, skipped=skipped)
+
     def tool_search_files(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
         root = self.pm.resolve_target(str(action.get("path", ".")))
         pattern = str(action.get("pattern", ""))

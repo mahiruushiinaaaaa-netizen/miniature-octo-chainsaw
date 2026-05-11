@@ -26,6 +26,7 @@ Anti-hallucination improvements: the agent now enriches prompts with retrieved w
 - **Platform-Agnostic Interface**: Uses a `PlatformAdapter` to normalize filesystem and process operations across Windows, Linux, and macOS.
 - **Live Box Hybrid UI**: A modern terminal interface that blends sequential reasoning with boxed execution. Agent thoughts stream naturally in the terminal, while command outputs are isolated in a dedicated, live-updating panel for maximum focus.
 - **Smart Media Player**: Includes an ultra-light floating music player with VLC background playback, autoplay (relevance-based), track queuing, and intelligent enqueuing (searches while playing automatically add to the queue).
+- **Batch File Operations**: Efficient bulk file operations (`batch_read_files`, `batch_delete_files`, `batch_copy_paths`, `batch_move_paths`) that significantly reduce overhead when working with multiple files simultaneously.
 
 ## Project Structure
 - `mini_ai/core/`: Infrastructure, configuration, and execution logic.

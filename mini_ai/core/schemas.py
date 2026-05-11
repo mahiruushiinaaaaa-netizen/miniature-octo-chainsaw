@@ -197,6 +197,52 @@ TOOL_SCHEMAS = {
         ],
         description="Execute a JavaScript or TypeScript code snippet using Deno",
     ),
+    "batch_read_files": ToolSchema(
+        name="batch_read_files",
+        params=[
+            ParamSchema(
+                name="files",
+                type="list",
+                items_type="string",
+                description="List of file paths to read in a single operation",
+            )
+        ],
+        description="Read multiple files in a single batch operation for efficiency",
+    ),
+    "batch_delete_files": ToolSchema(
+        name="batch_delete_files",
+        params=[
+            ParamSchema(
+                name="paths",
+                type="list",
+                items_type="string",
+                description="List of file/directory paths to delete",
+            )
+        ],
+        description="Delete multiple files or directories in a single batch operation",
+    ),
+    "batch_copy_paths": ToolSchema(
+        name="batch_copy_paths",
+        params=[
+            ParamSchema(
+                name="operations",
+                type="list",
+                description="List of {src, dst} dicts specifying copy operations",
+            )
+        ],
+        description="Copy multiple files or directories in a single batch operation",
+    ),
+    "batch_move_paths": ToolSchema(
+        name="batch_move_paths",
+        params=[
+            ParamSchema(
+                name="operations",
+                type="list",
+                description="List of {src, dst} dicts specifying move/rename operations",
+            )
+        ],
+        description="Move/rename multiple files or directories in a single batch operation",
+    ),
 }
 
 

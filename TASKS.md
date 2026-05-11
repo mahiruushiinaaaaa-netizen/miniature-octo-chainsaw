@@ -1,3 +1,20 @@
+#### Done (Latest)
+- **Batch File Operations**: Added efficient bulk file operations for improved performance:
+  - `batch_read_files`: Read multiple files in a single operation
+  - `batch_delete_files`: Delete multiple files/directories at once
+  - `batch_copy_paths`: Copy multiple files/directories in batch
+  - `batch_move_paths`: Move/rename multiple files/directories in batch
+  - Added schemas in `schemas.py` for all batch operations
+  - Implemented tool handlers in `executor.py` with proper error handling and summaries
+  - Operations report success/failure/skipped counts for transparency
+  - Supports both files and directories in a single batch operation
+- **Expanded Test Coverage**: Added comprehensive test suites:
+  - `tests/test_executor.py`: Tests for ToolExecutor including batch operations, result truncation, JSON safety
+  - `tests/test_commands.py`: Tests for CommandRouter including ChatHistory, slash commands, file operations
+  - Tests cover batch_read_files, batch_delete_files, batch_copy_paths, batch_move_paths
+  - Tests for schema validation of new batch operations
+  - Tests for basic ToolExecutor functionality (result truncation, _to_json_safe, tool_answer)
+
 #### Done
 - **System Improvement Prompt**: Created `prompt.txt` with comprehensive guidelines to fix hallucinations and improve task execution:
   - Path handling rules (always use absolute paths, verify before use)
