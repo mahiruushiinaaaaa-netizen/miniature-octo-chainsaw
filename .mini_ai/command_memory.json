@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "last_updated": 1778657728.0920386,
+  "patterns": [
+    {
+      "command": "python -m venv calculator_env",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\try",
+      "exit_code": 0,
+      "success": true,
+      "timestamp": 1778657728.0920386,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "composer create-project laravel/laravel my-laravel-app",
+      "cwd": "C:\\Users\\ADMIN\\Desktop",
+      "exit_code": 0,
+      "success": true,
+      "timestamp": 1778599012.324206,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "composer create-project laravel/laravel my-laravel-app",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 0,
+      "success": true,
+      "timestamp": 1778596297.4489596,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "cd C:\\Users\\ADMIN\\Downloads\\my-laravel-app",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 0,
+      "success": true,
+      "timestamp": 1778574497.3695211,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "npm install -g cd",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 0,
+      "success": true,
+      "timestamp": 1778564613.8855937,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "npm install -g create-react-native-app",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 0,
+      "success": true,
+      "timestamp": 1778550061.3906486,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "npx react-native init my-react-native-app",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\outputs",
+      "exit_code": 1,
+      "success": false,
+      "timestamp": 1778603476.4048977,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "composer create-project laravel/laravel my-laravel-app",
+      "cwd": "C:\\Users\\ADMIN\\Downloads\\my-laravel-app",
+      "exit_code": 9009,
+      "success": false,
+      "timestamp": 1778602799.4983218,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "cd C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39 && php artisan migrate",
+      "cwd": "C:\\Users\\ADMIN\\Downloads\\my-laravel-app",
+      "exit_code": 1,
+      "success": false,
+      "timestamp": 1778602197.5417063,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "composer create-project laravel/laravel my-laravel-app",
+      "cwd": "C:\\Users\\ADMIN\\Downloads",
+      "exit_code": 1,
+      "success": false,
+      "timestamp": 1778599851.3974006,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "rmdir /s /q \"C:\\Users\\ADMIN\\Downloads\\my-laravel-app\"",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 1,
+      "success": false,
+      "timestamp": 1778595801.1270142,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "cd C:\\Users\\ADMIN\\Downloads && composer create-project laravel/laravel my-laravel-app",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 1,
+      "success": false,
+      "timestamp": 1778595646.1341014,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "php artisan serve",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 1,
+      "success": false,
+      "timestamp": 1778576035.7348034,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "winget install composer",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": -1,
+      "success": false,
+      "timestamp": 1778571350.1020806,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "php artisan install",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 1,
+      "success": false,
+      "timestamp": 1778570567.0591326,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "cd C:/Users/ADMIN/Downloads && composer create-project laravel/laravel my-laravel-app",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 9009,
+      "success": false,
+      "timestamp": 1778569358.186282,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "php --version",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 9009,
+      "success": false,
+      "timestamp": 1778566265.6057513,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "php -r \"copy('https://getcomposer.org/installer', 'composer-setup.php');\" && php composer-setup.php --install-dir=C:/Users/ADMIN/AppData/Local/Microsoft/WinGet/Packages --filename=composer.phar",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 9009,
+      "success": false,
+      "timestamp": 1778564654.0626836,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "composer install",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 9009,
+      "success": false,
+      "timestamp": 1778564654.054565,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "composer --version",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 9009,
+      "success": false,
+      "timestamp": 1778564653.4484956,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    },
+    {
+      "command": "cd my-laravel-app && composer create-project laravel/laravel my-laravel-app && cd .. && php my-laravel-app/my-laravel-app/artisan serve",
+      "cwd": "C:\\Users\\ADMIN\\Desktop\\files\\ai projects\\mini_ai_v39",
+      "exit_code": 1,
+      "success": false,
+      "timestamp": 1778550939.7744281,
+      "context": {
+        "files": [],
+        "description": "Command executed in session"
+      },
+      "file_patterns": []
+    }
+  ]
+}

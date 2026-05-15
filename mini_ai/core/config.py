@@ -74,6 +74,11 @@ class Config:
     max_tools_per_turn: int = 8
     connection_pool_size: int = 4
     reconnect_timeout: int = 60
+    use_micro_prompts: bool = True  # When False, falls back to _build_system_prompt() behavior
+    use_ollama: bool = True  # Always use Ollama (main model + 0.5B fast model)
+    ollama_model: str = ""  # Main agent model — selected at startup
+    ollama_fast_model: str = ""  # Fast model — selected at startup
+    idle_timeout: int = 180  # Seconds of inactivity before stopping AI servers (0 = never stop)
     
     def __post_init__(self):
         """Resolve paths after initialization."""

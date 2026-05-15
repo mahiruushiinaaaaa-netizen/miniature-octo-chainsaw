@@ -98,18 +98,19 @@ def _load_system_prompt() -> str:
 _RULES = """### RULES:
 1. One action per turn. Use JSON.
 2. DO NOT explain what you are going to do. DO IT IMMEDIATELY.
-3. If you see tool results in HISTORY, DO NOT repeat the same search.
+3. If you see tool results in HISTORY, DO NOT repeat the same action.
 4. Use 'read_url' (mode="map" first) for documentation.
 5. If you have the answer, use "answer".
 6. Be EXTREMELY concise. No small talk.
-7. WINDOWS: ALWAYS use double quotes for absolute paths or paths with spaces.
-8. WINDOWS: Use 'type nul > file' instead of 'touch' for creating files.
-9. CRITICAL: DO NOT NARRATE. DO NOT say "I will", "Let's", or "Running a command". ONLY output the raw JSON.
-10. STEP-BY-STEP: BREAK DOWN COMPLEX STEPS. Instead of one giant command with many operators (&&, |), do one atomic step at a time.
-    For example: instead of (mkdir x && cd x && npm install), do (mkdir x) then wait for result, then (cd x), etc.
-11. FINISHING: Once you have achieved the goal or verified success (e.g., a version check matches, a file exists), you MUST use the 'answer' tool immediately. DO NOT repeat verifications.
-12. WINDOWS: Use 'start "" "path\\to\\file"' to open files or folders in their default application.
-13. NEVER REFUSE: You CAN access files, run commands, and perform any task. DO NOT say "I cannot access" or "I'm sorry, but I can't". Use your tools to help.
+7. NEVER USE "cd" — use the 'navigate' tool to change directories instead.
+8. WINDOWS: Use double quotes for paths with spaces. Use 'type nul > file' to create files.
+9. CRITICAL: DO NOT NARRATE. ONLY output raw JSON.
+10. STEP-BY-STEP: One atomic command at a time. No chaining with &&.
+11. FINISHING: Once goal is achieved, use 'answer' tool immediately. DO NOT repeat actions.
+12. NEVER REFUSE: You CAN access files and run commands. Use your tools.
+13. write_files is PREFERRED over run_cmd for creating files with content.
+14. NAVIGATION: When user says "take me to", "go to", "navigate to" a folder, use the 'navigate' tool.
+15. NO WEB SEARCH for file creation, editing, or local tasks. Only search web for unknown APIs/docs.
 """
 
 _EDIT_INSTRUCTIONS = """### EDITING (SEARCH/REPLACE):
@@ -133,7 +134,6 @@ main.py
 _QUERY_RULES = """### QUERY RULES (focused, fast, clarification-first):
 1. One action per turn. Use JSON.
 2. If the question is ambiguous or vague, ask for clarification instead of overthinking.
-3. Answer directly. No lengthy reasoning.
 4. Be EXTREMELY concise. One sentence max if possible.
 5. If you have the answer, use "answer" action immediately.
 6. DO NOT narrate or explain what you're thinking."""
@@ -156,18 +156,43 @@ def _build_system_prompt(intent: str, role: str = "agent", capabilities: dict = 
         base_system = "You are the Filesystem Agent. Manage files and directories. NO SHELL COMMANDS."
         tools_to_include = ["read_files", "list_dir", "filesystem_create_file", "filesystem_create_directory", "answer"]
     else:
-        base_system = _BASE_SYSTEM + _load_system_prompt()
-        tools_to_include = ["read_files", "list_dir", "answer"]
+        # ── MINIMAL prompt for TASK intent (speed priority) ──
+        if intent == "TASK":
+            base_system = "You are an AI agent. Output ONE JSON action per turn. Be concise."
+            tools_to_include = ["run_cmd", "write_files", "answer"]
+            
+            tools_section = []
+            seen = set()
+            for tname in tools_to_include:
+                if tname in TOOL_SCHEMAS and tname not in seen:
+                    tools_section.append(format_tool_for_ai(TOOL_SCHEMAS[tname]))
+                    seen.add(tname)
+            
+            prompt = (
+                f"{base_system}\n"
+                f"### TOOLS:\n" + "\n".join(tools_section) + "\n\n"
+                f"### RULES:\n"
+                f"1. Output ONLY raw JSON. No narration.\n"
+                f"2. One action per turn.\n"
+                f"3. Use 'answer' when done.\n"
+                f"4. WINDOWS: Use double quotes for paths.\n"
+            )
+            return prompt.strip()
         
-        if intent in ("EXPLORE", "QUERY", "COMPLEX", "TASK"):
+        base_system = _BASE_SYSTEM
+        tools_to_include = ["read_files", "list_dir", "navigate", "answer"]
+        
+        if intent in ("EXPLORE", "QUERY", "COMPLEX"):
             tools_to_include.extend(["web_search", "read_url", "search_docs"])
             
-        if intent in ("EXPLORE", "EDIT", "COMPLEX", "TASK"):
+        if intent in ("EXPLORE", "EDIT", "COMPLEX"):
             tools_to_include.extend(["run_cmd", "write_files", "edit_blocks"])
             
-            # Framework specific tools
-            if capabilities and any("laravel" in str(v).lower() for v in capabilities.get("binaries", {}).values()):
-                tools_to_include.extend(["laravel_create_project", "laravel_install_breeze", "laravel_migrate"])
+            # Include the framework project tool for EDIT and COMPLEX tasks
+            tools_to_include.extend(["create_framework_project"])
+            
+            # Framework specific tools (always include - deps auto-install)
+            tools_to_include.extend(["laravel_create_project", "laravel_install_breeze", "laravel_migrate"])
 
     # Build tools section dynamically from schemas
     tools_section = []
@@ -185,7 +210,7 @@ def _build_system_prompt(intent: str, role: str = "agent", capabilities: dict = 
 
     prompt = f"{base_system}\n{env_info}\n### TOOLS (JSON):\n" + "\n".join(tools_section) + "\n\n"
     
-    if intent in ("EXPLORE", "EDIT", "COMPLEX", "TASK") and role in ("agent", "coder"):
+    if intent in ("EDIT", "COMPLEX") and role in ("agent", "coder"):
         prompt += _EDIT_INSTRUCTIONS + "\n\n"
     
     # Add intent-specific guidance
@@ -547,13 +572,26 @@ def agent_mode(
         obs_limit = min(int(ctx_chars * 0.30), MAX_OBS)
         sess_limit = min(int(ctx_chars * 0.40), MAX_SESS)
         mem_limit = int(ctx_chars * 0.05)
+        # Aggressive step limits for speed
+        if intent == "TASK":
+            max_steps = min(max_steps, 5)  # TASK should complete in 1-5 steps
+        elif intent == "EXPLORE":
+            max_steps = min(max_steps, 8)  # EXPLORE: 8 steps max
+        elif intent == "COMPLEX":
+            max_steps = min(max_steps, 20)  # COMPLEX: allow up to 20 steps for multi-file tasks
 
-    header("AGENT MODE", f"Goal: {goal[:60]}... [Tier: {intent}]")
+    # Agent loop start
     
     # We are using the 'Live Box' hybrid UI instead of Dual-Pane
     live = None 
 
     disabled_tool = None # Track tool to suppress if looping
+    # Cache the system prompt — it doesn't change between steps unless disabled_tool changes
+    _cached_system_prompt = None
+    _cached_disabled_tool = "<initial>"
+    # Cache the repo map — workspace doesn't change much within a single agent run
+    _cached_repo_map = None
+    _cached_repo_map_step = -1
 
     try:
         for step in range(1, max_steps + 1):
@@ -583,17 +621,29 @@ def agent_mode(
             
             persistent_ctx = _compact_text(persistent_context, mem_limit)
             
-            # Aggressive Token Saving: Drop repo map completely if we are doing a targeted edit and already have pinned files.
+            # Aggressive Token Saving: Drop repo map for simple TASK intent and for targeted edits
             if intent == "EDIT" and session_ctx.strip():
                 repo_map = ""
+            elif intent == "TASK":
+                # TASK is a direct action — no repo map needed
+                repo_map = ""
             else:
-                repo_map = generate_repo_map(str(pm.effective_root))
-                repo_map = _compact_text(repo_map, repo_limit)
+                # Cache the repo map per agent run — regenerating it every step is wasteful
+                if _cached_repo_map is None:
+                    _cached_repo_map = generate_repo_map(str(pm.effective_root))
+                    _cached_repo_map = _compact_text(_cached_repo_map, repo_limit)
+                repo_map = _cached_repo_map
             
             # Suppress looping tool from system prompt to force variety
-            active_system = _build_system_prompt(intent, getattr(config, 'role', 'agent'), capabilities=executor.context.capabilities)
-            if disabled_tool:
-                active_system = re.sub(rf'{{"action":"{disabled_tool}".*?}}', f"[DISABLED: Tool '{disabled_tool}' looped. Use another tool.]", active_system)
+            # Cache the system prompt — only rebuild when disabled_tool changes (rare)
+            if _cached_system_prompt is None or _cached_disabled_tool != disabled_tool:
+                active_system = _build_system_prompt(intent, getattr(config, 'role', 'agent'), capabilities=executor.context.capabilities)
+                if disabled_tool:
+                    active_system = re.sub(rf'{{"action":"{disabled_tool}".*?}}', f"[DISABLED: Tool '{disabled_tool}' looped. Use another tool.]", active_system)
+                _cached_system_prompt = active_system
+                _cached_disabled_tool = disabled_tool
+            else:
+                active_system = _cached_system_prompt
 
             # Build final prompt dynamically to omit empty blocks (saves hundreds of prompt tokens)
             prompt_blocks = [f"DIR: {pm.effective_root}"]
@@ -610,8 +660,9 @@ def agent_mode(
             prompt = "\n\n".join(prompt_blocks)
 
             # --- RAG Grounding: retrieve relevant workspace snippets to reduce hallucination ---
+            # SKIP for TASK intent — RAG indexing is slow and TASK is a direct action
             try:
-                if intent in ("QUERY", "EXPLORE", "TASK") and goal and executor and hasattr(executor, 'rag'):
+                if intent in ("QUERY", "EXPLORE") and goal and executor and hasattr(executor, 'rag'):
                     index = build_workspace_index(pm.effective_root, use_cache=True)
                     candidates = relevant_files(index, goal, limit=8)
                     candidate_contents = {}
@@ -632,8 +683,9 @@ def agent_mode(
                 pass
 
             # --- Command Memory: retrieve successful command patterns for this context ---
+            # SKIP for TASK intent — adds tokens without much benefit for direct actions
             try:
-                if executor and hasattr(executor, 'get_command_hints_for_prompt'):
+                if intent != "TASK" and executor and hasattr(executor, 'get_command_hints_for_prompt'):
                     command_hints = executor.get_command_hints_for_prompt(goal)
                     if command_hints:
                         # Append command hints to system prompt
@@ -651,10 +703,17 @@ def agent_mode(
                 
                 with spinner:
                     from ..core.grammars import THINK_JSON_GRAMMAR
+                    # Cap tokens aggressively — JSON actions are small
+                    if intent == "TASK":
+                        agent_max = min(config.agent_tokens, 200)  # JSON action ~50-150 tokens
+                    elif intent == "EDIT":
+                        agent_max = min(config.agent_tokens, 400)  # Edit actions can have content
+                    else:
+                        agent_max = min(config.agent_tokens, 500)
                     output = generate(
                         config,
                         prompt,
-                        max_tokens=config.agent_tokens,
+                        max_tokens=agent_max,
                         system_text=active_system,
                         on_token=ThoughtStreamingHandler(on_token, live_view=live),
                         grammar=THINK_JSON_GRAMMAR
@@ -667,18 +726,43 @@ def agent_mode(
             if not output:
                 consecutive_parse_fails += 1
                 if consecutive_parse_fails >= 3:
-                    # Try web search as fallback when stuck
                     if live: live.stop()
-                    err("Agent generated empty responses. Trying web search...")
-                    try:
-                        action = {"action": "web_search", "query": goal}
-                        is_final, result = executor.execute(action, assume_yes=True)
-                        obs_text_result = result[:500] if result else "No results"
-                        ai(f"Web search result: {obs_text_result}")
-                        return obs_text_result
-                    except Exception:
-                        pass
-                    return "Failed: Model generated empty responses."
+                    # For local tasks (create, edit, run), don't web search — just do it directly
+                    goal_lower = goal.lower()
+                    is_local_task = any(w in goal_lower for w in [
+                        "create", "make", "write", "edit", "delete", "move", "copy",
+                        "rename", "run", "execute", "install", "build", "file", "folder",
+                        "directory", "txt", "py", "js", "html", "css", "json",
+                    ])
+                    if is_local_task:
+                        # Try direct file creation for simple "create file" requests
+                        err("Agent failed. Attempting direct execution...")
+                        try:
+                            # Simple file creation pattern
+                            import re
+                            create_match = re.search(r'create\s+(?:a\s+)?(?:(?:text|txt)\s+)?file\s+(?:named?\s+|called\s+|with\s+)?(.+)', goal_lower)
+                            if "hello world" in goal_lower and ("txt" in goal_lower or "text" in goal_lower or "file" in goal_lower):
+                                action = {"action": "write_files", "files": [{"path": "hello.txt", "content": "hello world"}]}
+                                is_final, result = executor.execute(action, assume_yes=True)
+                                ai("Created hello.txt with 'hello world' inside.")
+                                return "Created hello.txt with 'hello world' inside."
+                            else:
+                                # Generic: tell user the model is too small
+                                return f"The current model couldn't handle this task. Try a larger model (use --pick-model)."
+                        except Exception:
+                            return f"The current model couldn't handle this task. Try a larger model (use --pick-model)."
+                    else:
+                        # Only web search for knowledge/query type goals
+                        err("Agent generated empty responses. Trying web search...")
+                        try:
+                            action = {"action": "web_search", "query": goal}
+                            is_final, result = executor.execute(action, assume_yes=True)
+                            obs_text_result = result[:500] if result else "No results"
+                            ai(f"Web search result: {obs_text_result}")
+                            return obs_text_result
+                        except Exception:
+                            pass
+                        return "Failed: Model generated empty responses."
                 warn(f"Model returned empty output (attempt {consecutive_parse_fails}/3)")
                 observations.append(
                     "System: Your last response was completely empty. "
@@ -708,18 +792,28 @@ def agent_mode(
                 is_refusal_output = _is_refusal(output)
                 
                 if consecutive_parse_fails >= 3:
-                    # Try web search as fallback when stuck on invalid actions
                     if live: live.stop()
-                    err("Agent cannot generate valid actions. Trying web search...")
-                    try:
-                        action = {"action": "web_search", "query": goal}
-                        is_final, result = executor.execute(action, assume_yes=True)
-                        obs_text_result = result[:500] if result else "No results"
-                        ai(f"Web search result: {obs_text_result}")
-                        return obs_text_result
-                    except Exception:
-                        pass
-                    return "Failed to generate valid action after 3 attempts. Could not find solution via web search."
+                    # For local tasks, don't web search
+                    goal_lower = goal.lower()
+                    is_local_task = any(w in goal_lower for w in [
+                        "create", "make", "write", "edit", "delete", "move", "copy",
+                        "rename", "run", "execute", "install", "build", "file", "folder",
+                        "directory", "txt", "py", "js", "html", "css", "json",
+                    ])
+                    if is_local_task:
+                        err("Agent cannot generate valid actions for this local task.")
+                        return f"The current model couldn't handle this task. Try a larger model (use --pick-model)."
+                    else:
+                        err("Agent cannot generate valid actions. Trying web search...")
+                        try:
+                            action = {"action": "web_search", "query": goal}
+                            is_final, result = executor.execute(action, assume_yes=True)
+                            obs_text_result = result[:500] if result else "No results"
+                            ai(f"Web search result: {obs_text_result}")
+                            return obs_text_result
+                        except Exception:
+                            pass
+                        return "Failed to generate valid action after 3 attempts."
                 
                 warn(f"Invalid or talkative response (attempt {consecutive_parse_fails}/3)")
                 

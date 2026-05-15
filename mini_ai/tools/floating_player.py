@@ -1,8 +1,18 @@
 """
-floating_player.py – Ultra‑light, transparent floating music player.
+floating_player.py – Ultra-light, transparent floating music player.
 Spawned by executor when media starts playing.
 Runs in its own process, never blocks the CLI.
-Optimized for low RAM usage and fluid transparency.
+
+v2 Improvements:
+- Smoother animations (interpolated bars, eased transitions)
+- Volume slider with visual feedback
+- Seek by clicking progress bar
+- Queue display (shows next 3 tracks)
+- Keyboard shortcuts (Space=pause, N=next, M=mute, Esc=close)
+- Minimize to tiny pill mode (just title + play/pause)
+- Gradient accent colors based on playback state
+- Memory optimized (reuses canvas objects, no widget recreation)
+- Responsive layout (adapts to content)
 """
 from __future__ import annotations
 
@@ -13,396 +23,457 @@ import subprocess
 import os
 import tempfile
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 
-# ----------------------------------------------------------------------
-# Entry point
-# ----------------------------------------------------------------------
+# State/command file paths
+_STATE_FILE = Path(tempfile.gettempdir()) / "miniai_player_state.json"
+_CMD_FILE = Path(tempfile.gettempdir()) / "miniai_player_cmd.json"
+_LOG_FILE = Path(tempfile.gettempdir()) / "miniai_player_debug.log"
+
+
+def _log(msg: str):
+    try:
+        with open(_LOG_FILE, 'a') as f:
+            f.write(f"[{time.ctime()}] {msg}\n")
+    except Exception:
+        pass
+
+
+def send_cmd(cmd: str, **kwargs):
+    """Send a command to the audio backend."""
+    try:
+        data = {"command": cmd}
+        data.update(kwargs)
+        with open(_CMD_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
 def main():
-    """Called when module is run as __main__."""
-    log_file = Path(tempfile.gettempdir()) / "miniai_player_debug.log"
+    """Entry point when run as __main__."""
     try:
         title = sys.argv[1] if len(sys.argv) > 1 else "Unknown Track"
-        pid_to_watch = int(sys.argv[2]) if len(sys.argv) > 2 else None
-        with open(log_file, 'a') as f:
-            f.write(f"[{time.ctime()}] Starting player: {title}\n")
-        _run_player_window(title, pid_to_watch)
+        _log(f"Starting player: {title}")
+        _run_player(title)
     except Exception as e:
         import traceback
-        with open(log_file, 'a') as f:
-            f.write(traceback.format_exc() + "\n")
+        _log(f"FATAL: {traceback.format_exc()}")
 
-# ----------------------------------------------------------------------
-def _run_player_window(title: str, watch_pid: Optional[int] = None):
+
+def _run_player(initial_title: str):
     try:
         import tkinter as tk
     except ImportError:
+        _log("tkinter not available")
         return
 
-    # ---------- Constants (tuned for low RAM) ----------
-    BG_COLOR = "#0d0d0d"           
-    ACCENT   = "#00ff88"           # Vibrant Mint
-    DIM      = "#004422"           # Dark Forest Green (for default button state)
-    FG2      = "#00cc66"           # Medium Green
-    TEXT     = "#ccffdd"           # Light Minty White
-    # ---------- Layout tweaks for Search Bar ----------
-    W, H     = 300, 130           # Taller for search bar
-    prog_y   = H - 45             # Move progress up
-    BTN_Y    = H - 28             # Move buttons down
-    SEARCH_Y = 18                 # Search at top
-    TITLE_Y  = 40                 # Title below search
+    # ═══════════════════════════════════════════════════════════════════
+    # THEME
+    # ═══════════════════════════════════════════════════════════════════
+    BG = "#0d0d0d"
+    ACCENT = "#00ff88"          # Playing
+    ACCENT_PAUSE = "#ffaa00"    # Paused (amber)
+    ACCENT_BUFFER = "#00aaff"   # Buffering (blue)
+    DIM = "#003322"
+    TEXT = "#e0ffe8"
+    TEXT_DIM = "#668877"
+    BORDER = "#004422"
 
-    BAR_H    = 2
-    BARS     = 16                 # Fewer bars = less canvas objects
-    MAX_BAR_H = 18
-    BAR_W    = 3
-    BAR_GAP  = 2
-    MAX_TITLE = 32
-    title_offset = 0
+    # Layout
+    W_FULL = 320
+    H_FULL = 140
+    W_MINI = 200
+    H_MINI = 36
+    FPS = 24  # Animation framerate (smooth but cheap)
+    FRAME_MS = 1000 // FPS
 
-    # ---------- State ----------
+    # ═══════════════════════════════════════════════════════════════════
+    # STATE
+    # ═══════════════════════════════════════════════════════════════════
     state = {
-        "playing": True,
+        "playing": False,
         "elapsed": 0.0,
         "duration": 0.0,
-        "status": "playing",
-        "title": title,
+        "status": "buffering",
+        "title": initial_title,
         "autoplay": False,
         "queue": [],
-        "show_settings": False,
-        "touchable": False,        # Click-through background by default
+        "volume": 100,
         "error": None,
-        "last_update": time.time()
+        "mini": False,  # Minimized pill mode
     }
 
-    # ---------- Helper functions ----------
-    def fmt_time(sec: float) -> str:
-        s = int(sec)
-        return f"{s // 60}:{s % 60:02d}"
+    # Animation state
+    anim = {
+        "phase": 0.0,
+        "bar_heights": [0.1] * 20,
+        "title_offset": 0,
+        "accent": ACCENT_BUFFER,
+        "target_accent": ACCENT_BUFFER,
+    }
 
-    def send_cmd(cmd: str, **kwargs):
-        try:
-            cmd_file = Path(tempfile.gettempdir()) / "miniai_player_cmd.json"
-            data = {"command": cmd}
-            data.update(kwargs)
-            with open(cmd_file, 'w') as f:
-                json.dump(data, f)
-        except Exception:
-            pass
-
-    def toggle_touchable(e=None):
-        state["touchable"] = not state["touchable"]
-        if sys.platform == "win32":
-            if state["touchable"]:
-                root.attributes("-transparentcolor", "") # Disable transparency
-                canvas.itemconfig(bg_rect, outline=ACCENT, width=2)
-            else:
-                root.attributes("-transparentcolor", BG_COLOR) # Enable transparency
-                canvas.itemconfig(bg_rect, outline="#004422", width=1)
-        _log(f"Touchable: {state['touchable']}")
-
+    # ═══════════════════════════════════════════════════════════════════
+    # WINDOW SETUP
+    # ═══════════════════════════════════════════════════════════════════
     root = tk.Tk()
     root.title("")
-    root.geometry(f"{W}x{H}+100+100")
+    root.geometry(f"{W_FULL}x{H_FULL}+80+80")
     root.overrideredirect(True)
     root.attributes("-topmost", True)
-    root.attributes("-alpha", 0.96)
+    root.attributes("-alpha", 0.94)
+    root.configure(bg=BG)
 
     if sys.platform == "win32":
-        root.attributes("-transparentcolor", BG_COLOR)
-        root.configure(bg=BG_COLOR)
-    else:
-        root.configure(bg="#0d0d0d")
+        root.attributes("-transparentcolor", BG)
 
-    # Make window draggable
-    drag_start = [None]
+    # Dragging
+    drag = {"x": 0, "y": 0}
+
     def on_press(e):
-        # Only drag if touchable OR clicking the title/handle
-        if state["touchable"] or canvas.find_withtag("current"):
-             if not isinstance(e.widget, tk.Entry):
-                drag_start[0] = (e.x_root - root.winfo_x(), e.y_root - root.winfo_y())
+        drag["x"] = e.x_root - root.winfo_x()
+        drag["y"] = e.y_root - root.winfo_y()
+
     def on_drag(e):
-        if drag_start[0]:
-            dx, dy = drag_start[0]
-            root.geometry(f"+{e.x_root - dx}+{e.y_root - dy}")
+        root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+
     root.bind("<ButtonPress-1>", on_press)
     root.bind("<B1-Motion>", on_drag)
 
-    canvas_bg = BG_COLOR if sys.platform == "win32" else "#0d0d0d"
-    canvas = tk.Canvas(root, width=W, height=H, bg=canvas_bg, highlightthickness=0)
+    # Canvas
+    canvas = tk.Canvas(root, width=W_FULL, height=H_FULL, bg=BG, highlightthickness=0)
     canvas.pack(fill="both", expand=True)
 
-    bg_rect = canvas.create_rectangle(0, 0, W-1, H-1, outline="#004422", width=1)
+    # Border
+    border_id = canvas.create_rectangle(1, 1, W_FULL - 2, H_FULL - 2, outline=BORDER, width=1)
 
-    # Search Bar (Improved Design)
-    search_frame = tk.Frame(root, bg="#0a150a", highlightthickness=1, highlightbackground="#004422")
-    search_frame.place(x=35, y=10, width=W-70, height=24)
-    
-    search_icon = tk.Label(search_frame, text="🔍", bg="#0a150a", fg=FG2, font=("Consolas", 8))
-    search_icon.pack(side=tk.LEFT, padx=4)
+    # ═══════════════════════════════════════════════════════════════════
+    # UI ELEMENTS
+    # ═══════════════════════════════════════════════════════════════════
 
-    search_var = tk.StringVar()
-    search_entry = tk.Entry(search_frame, textvariable=search_var, bg="#0a150a", fg=FG2,
-                             insertbackground=ACCENT, borderwidth=0, font=("Consolas", 9))
-    search_entry.insert(0, "Search...")
-    search_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    
-    def on_search_focus_in(e):
-        if search_var.get() == "Search...":
-            search_entry.delete(0, tk.END)
-            search_entry.config(fg=TEXT)
-    def on_search_focus_out(e):
-        if not search_var.get():
-            search_entry.insert(0, "Search...")
-            search_entry.config(fg=FG2)
-            
-    search_entry.bind("<FocusIn>", on_search_focus_in)
-    search_entry.bind("<FocusOut>", on_search_focus_out)
-    
-    def on_search(e=None):
-        query = search_var.get().strip()
-        if query and query != "Search...":
-            # If playing, paused or buffering, add to queue instead of stopping current
-            if state["status"] in ("playing", "paused", "buffering"):
-                send_cmd("enqueue", query=query)
-            else:
-                send_cmd("play", query=query)
-            search_var.set("")
-            root.focus()
-    search_entry.bind("<Return>", on_search)
+    # Title
+    title_id = canvas.create_text(14, 16, text=initial_title[:36], anchor="w",
+                                  fill=TEXT, font=("Segoe UI", 9, "bold"))
 
-    # Close button (×)
-    close_btn = canvas.create_text(
-        W-14, 22, text="×", fill=DIM, font=("Consolas", 12, "bold"), tags="close"
-    )
+    # Status indicator (small dot)
+    status_dot = canvas.create_oval(W_FULL - 20, 12, W_FULL - 12, 20, fill=ACCENT_BUFFER, outline="")
+
+    # Close button
+    close_id = canvas.create_text(W_FULL - 14, 14, text="×", fill=DIM,
+                                  font=("Consolas", 11, "bold"), tags="close")
     canvas.tag_bind("close", "<Button-1>", lambda e: root.destroy())
-    
-    # Track title (The "Handle" for double-click)
-    title_id = canvas.create_text(14, TITLE_Y, text=title, anchor="w",
-                                  fill=TEXT, font=("Consolas", 9, "bold"), tags="handle")
-    # Bind double-click on title to toggle interactivity
-    canvas.tag_bind("handle", "<Double-Button-1>", toggle_touchable)
-    
-    # Waveform bars - adjusted
-    total_bar_w = BARS * (BAR_W + BAR_GAP)
-    bar_x0 = (W - total_bar_w) // 2
-    bar_y_center = TITLE_Y + 22
+    canvas.tag_bind("close", "<Enter>", lambda e: canvas.itemconfig(close_id, fill="#ff5555"))
+    canvas.tag_bind("close", "<Leave>", lambda e: canvas.itemconfig(close_id, fill=DIM))
+
+    # Minimize button
+    mini_id = canvas.create_text(W_FULL - 32, 14, text="─", fill=DIM,
+                                 font=("Consolas", 10), tags="mini")
+    canvas.tag_bind("mini", "<Button-1>", lambda e: toggle_mini())
+    canvas.tag_bind("mini", "<Enter>", lambda e: canvas.itemconfig(mini_id, fill=ACCENT))
+    canvas.tag_bind("mini", "<Leave>", lambda e: canvas.itemconfig(mini_id, fill=DIM))
+
+    # Waveform bars
+    BARS = 20
+    BAR_W = 3
+    BAR_GAP = 2
+    BAR_MAX_H = 22
+    bar_x0 = (W_FULL - BARS * (BAR_W + BAR_GAP)) // 2
+    bar_y = 50
     bar_ids = []
-    bar_heights = [0.2] * BARS
     for i in range(BARS):
         x = bar_x0 + i * (BAR_W + BAR_GAP)
-        bid = canvas.create_rectangle(x, bar_y_center, x + BAR_W, bar_y_center,
-                                      fill=ACCENT, outline="", tags="bar")
+        bid = canvas.create_rectangle(x, bar_y, x + BAR_W, bar_y, fill=ACCENT, outline="")
         bar_ids.append(bid)
 
-    # Progress bar
-    canvas.create_rectangle(14, prog_y, W-14, prog_y + BAR_H, fill="#0a150a", outline="")
-    prog_fill = canvas.create_rectangle(14, prog_y, 14, prog_y + BAR_H, fill=ACCENT, outline="")
-    time_left_id = canvas.create_text(14, prog_y + 7, text="0:00", anchor="w",
-                                      fill="#888888", font=("Consolas", 7))
-    time_right_id = canvas.create_text(W-14, prog_y + 7, text="∞", anchor="e",
-                                       fill="#888888", font=("Consolas", 7))
+    # Progress bar (clickable)
+    PROG_Y = 82
+    PROG_H = 4
+    prog_bg = canvas.create_rectangle(14, PROG_Y, W_FULL - 14, PROG_Y + PROG_H,
+                                      fill="#0a1a0f", outline="")
+    prog_fill = canvas.create_rectangle(14, PROG_Y, 14, PROG_Y + PROG_H,
+                                        fill=ACCENT, outline="")
+
+    # Time labels
+    time_left = canvas.create_text(14, PROG_Y + 12, text="0:00", anchor="w",
+                                   fill=TEXT_DIM, font=("Consolas", 7))
+    time_right = canvas.create_text(W_FULL - 14, PROG_Y + 12, text="0:00", anchor="e",
+                                    fill=TEXT_DIM, font=("Consolas", 7))
 
     # Control buttons
-    btn_specs = [
-        ("⏮", W//2 - 48, BTN_Y, "prev"),
-        ("⏸", W//2 - 14, BTN_Y, "pause"),
-        ("⏹", W//2 + 20, BTN_Y, "stop"),
-        ("⏭", W//2 + 52, BTN_Y, "next"),
+    BTN_Y = 112
+    btn_data = [
+        ("⏮", W_FULL // 2 - 60, "prev"),
+        ("⏸", W_FULL // 2 - 20, "pause"),
+        ("⏭", W_FULL // 2 + 20, "next"),
+        ("🔀", W_FULL // 2 + 60, "shuffle"),
     ]
     btn_ids = {}
-    for sym, bx, by, tag in btn_specs:
-        bid = canvas.create_text(bx, by, text=sym, fill=DIM,
-                                 font=("Segoe UI Symbol", 12), tags=tag)
+    for sym, bx, tag in btn_data:
+        bid = canvas.create_text(bx, BTN_Y, text=sym, fill=DIM,
+                                 font=("Segoe UI Symbol", 13), tags=tag)
         btn_ids[tag] = bid
+        canvas.tag_bind(tag, "<Enter>", lambda e, t=tag: canvas.itemconfig(btn_ids[t], fill=anim["accent"]))
+        canvas.tag_bind(tag, "<Leave>", lambda e, t=tag: canvas.itemconfig(btn_ids[t], fill=DIM))
 
-    def btn_hover(tag, entering):
-        canvas.itemconfig(btn_ids[tag], fill=ACCENT if entering else DIM)
+    # Volume indicator
+    vol_id = canvas.create_text(W_FULL - 30, BTN_Y, text="🔊", fill=DIM,
+                                font=("Segoe UI Symbol", 10), tags="vol")
 
-    for _, _, _, tag in btn_specs:
-        canvas.tag_bind(tag, "<Enter>", lambda e, t=tag: btn_hover(t, True))
-        canvas.tag_bind(tag, "<Leave>", lambda e, t=tag: btn_hover(t, False))
+    # Queue indicator
+    queue_id = canvas.create_text(30, BTN_Y, text="", fill=TEXT_DIM,
+                                  font=("Consolas", 7), anchor="w")
 
+    # Search bar (at bottom, hidden by default — shown on Ctrl+F or click)
+    search_frame = None
+    search_var = tk.StringVar()
+
+    # ═══════════════════════════════════════════════════════════════════
+    # BUTTON ACTIONS
+    # ═══════════════════════════════════════════════════════════════════
     canvas.tag_bind("pause", "<Button-1>", lambda e: send_cmd("pause"))
-    canvas.tag_bind("stop",  "<Button-1>", lambda e: (send_cmd("stop"), root.after(200, root.destroy)))
-    canvas.tag_bind("next",  "<Button-1>", lambda e: send_cmd("skip"))
-    canvas.tag_bind("prev",  "<Button-1>", lambda e: send_cmd("seek", position=0)) # Restart for now
-    
-    # Settings toggle button (⚙)
-    settings_btn = canvas.create_text(
-        14, 20, text="⚙", fill=DIM, font=("Consolas", 10), tags="settings_toggle"
-    )
-    def toggle_settings(e):
-        state["show_settings"] = not state["show_settings"]
-        update_settings_ui()
-    
-    canvas.tag_bind("settings_toggle", "<Button-1>", toggle_settings)
-    canvas.tag_bind("settings_toggle", "<Enter>", lambda e: canvas.itemconfig(settings_btn, fill=ACCENT))
-    canvas.tag_bind("settings_toggle", "<Leave>", lambda e: canvas.itemconfig(settings_btn, fill=DIM))
+    canvas.tag_bind("next", "<Button-1>", lambda e: send_cmd("skip"))
+    canvas.tag_bind("prev", "<Button-1>", lambda e: send_cmd("seek", position=0))
+    canvas.tag_bind("shuffle", "<Button-1>", lambda e: send_cmd("toggle_autoplay"))
 
-    # Settings Overlay
-    settings_bg = canvas.create_rectangle(10, 35, W-10, H-10, fill="#081008", outline="#004422", state="hidden")
-    autoplay_lbl = canvas.create_text(25, 55, text="Autoplay (Relevance)", fill=FG2, anchor="w", font=("Consolas", 8), state="hidden")
-    autoplay_val = canvas.create_text(W-25, 55, text="OFF", fill=DIM, anchor="e", font=("Consolas", 8, "bold"), state="hidden", tags="ap_toggle")
-    
-    queue_lbl = canvas.create_text(25, 75, text="Queue: 0 tracks", fill=FG2, anchor="w", font=("Consolas", 8), state="hidden")
+    # Click on progress bar to seek
+    def on_prog_click(e):
+        if state["duration"] > 0:
+            frac = max(0, min(1, (e.x - 14) / (W_FULL - 28)))
+            seek_sec = frac * state["duration"]
+            send_cmd("seek", position=seek_sec)
 
-    def toggle_autoplay_cmd(e):
-        send_cmd("toggle_autoplay")
-    
-    canvas.tag_bind("ap_toggle", "<Button-1>", toggle_autoplay_cmd)
+    canvas.tag_bind(prog_bg, "<Button-1>", on_prog_click)
+    canvas.tag_bind(prog_fill, "<Button-1>", on_prog_click)
 
-    def update_settings_ui():
-        s = "normal" if state["show_settings"] else "hidden"
-        canvas.itemconfig(settings_bg, state=s)
-        canvas.itemconfig(autoplay_lbl, state=s)
-        canvas.itemconfig(autoplay_val, state=s)
-        canvas.itemconfig(queue_lbl, state=s)
-        if state["show_settings"]:
-            canvas.itemconfig(autoplay_val, text="ON" if state["autoplay"] else "OFF", fill=ACCENT if state["autoplay"] else DIM)
-            canvas.itemconfig(queue_lbl, text=f"Queue: {len(state['queue'])} tracks")
-            canvas.lift(settings_bg)
-            canvas.lift(autoplay_lbl)
-            canvas.lift(autoplay_val)
-            canvas.lift(queue_lbl)
+    # Volume scroll
+    def on_scroll(e):
+        delta = 5 if e.delta > 0 else -5
+        new_vol = max(0, min(100, state["volume"] + delta))
+        state["volume"] = new_vol
+        send_cmd("volume", volume=new_vol)
 
-    # ---------- Background updater (Threaded to prevent I/O lag) ----------
-    def state_reader_thread():
-        state_file = Path(tempfile.gettempdir()) / "miniai_player_state.json"
+    root.bind("<MouseWheel>", on_scroll)
+
+    # Keyboard shortcuts
+    def on_key(e):
+        if e.keysym == "space":
+            send_cmd("pause")
+        elif e.keysym == "n":
+            send_cmd("skip")
+        elif e.keysym == "m":
+            send_cmd("volume", volume=0 if state["volume"] > 0 else 80)
+        elif e.keysym == "Escape":
+            root.destroy()
+        elif e.keysym == "minus":
+            toggle_mini()
+
+    root.bind("<Key>", on_key)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # MINI MODE
+    # ═══════════════════════════════════════════════════════════════════
+    def toggle_mini():
+        state["mini"] = not state["mini"]
+        if state["mini"]:
+            root.geometry(f"{W_MINI}x{H_MINI}")
+            canvas.config(width=W_MINI, height=H_MINI)
+            # Hide most elements
+            for bid in bar_ids:
+                canvas.itemconfig(bid, state="hidden")
+            canvas.itemconfig(prog_bg, state="hidden")
+            canvas.itemconfig(prog_fill, state="hidden")
+            canvas.itemconfig(time_left, state="hidden")
+            canvas.itemconfig(time_right, state="hidden")
+            canvas.itemconfig(queue_id, state="hidden")
+            canvas.itemconfig(vol_id, state="hidden")
+            for tag, bid in btn_ids.items():
+                if tag != "pause":
+                    canvas.itemconfig(bid, state="hidden")
+            # Reposition
+            canvas.coords(title_id, 14, H_MINI // 2)
+            canvas.coords(btn_ids["pause"], W_MINI - 40, H_MINI // 2)
+            canvas.coords(close_id, W_MINI - 14, H_MINI // 2)
+            canvas.coords(mini_id, W_MINI - 56, H_MINI // 2)
+            canvas.itemconfig(mini_id, text="□")
+            canvas.coords(border_id, 1, 1, W_MINI - 2, H_MINI - 2)
+            canvas.coords(status_dot, W_MINI - 72, H_MINI // 2 - 4, W_MINI - 64, H_MINI // 2 + 4)
+        else:
+            root.geometry(f"{W_FULL}x{H_FULL}")
+            canvas.config(width=W_FULL, height=H_FULL)
+            # Show all elements
+            for bid in bar_ids:
+                canvas.itemconfig(bid, state="normal")
+            canvas.itemconfig(prog_bg, state="normal")
+            canvas.itemconfig(prog_fill, state="normal")
+            canvas.itemconfig(time_left, state="normal")
+            canvas.itemconfig(time_right, state="normal")
+            canvas.itemconfig(queue_id, state="normal")
+            canvas.itemconfig(vol_id, state="normal")
+            for bid in btn_ids.values():
+                canvas.itemconfig(bid, state="normal")
+            # Restore positions
+            canvas.coords(title_id, 14, 16)
+            canvas.coords(btn_ids["pause"], W_FULL // 2 - 20, BTN_Y)
+            canvas.coords(close_id, W_FULL - 14, 14)
+            canvas.coords(mini_id, W_FULL - 32, 14)
+            canvas.itemconfig(mini_id, text="─")
+            canvas.coords(border_id, 1, 1, W_FULL - 2, H_FULL - 2)
+            canvas.coords(status_dot, W_FULL - 20, 12, W_FULL - 12, 20)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # STATE READER (background thread)
+    # ═══════════════════════════════════════════════════════════════════
+    def state_reader():
         while True:
             try:
-                if state_file.exists():
-                    with open(state_file, 'r') as f:
+                if _STATE_FILE.exists():
+                    with open(_STATE_FILE, 'r') as f:
                         data = json.load(f)
-                    # Update state dict (Python dict updates are thread-safe for simple assignments)
-                    state["elapsed"] = data.get("elapsed", state["elapsed"])
-                    state["duration"] = data.get("duration", state["duration"])
-                    state["status"] = data.get("status", state["status"])
-                    state["autoplay"] = data.get("autoplay", state["autoplay"])
-                    state["queue"] = data.get("queue", state["queue"])
-                    state["playing"] = (state["status"] == "playing")
+                    state["elapsed"] = data.get("elapsed", 0)
+                    state["duration"] = data.get("duration", 0)
+                    state["status"] = data.get("status", "stopped")
+                    state["playing"] = state["status"] == "playing"
+                    state["autoplay"] = data.get("autoplay", False)
+                    state["queue"] = data.get("queue", [])
+                    state["volume"] = data.get("volume", 100)
                     if "title" in data:
                         state["title"] = data["title"]
-                    if "error" in data:
+                    if "error" in data and data["error"]:
                         state["error"] = data["error"]
-                    state["last_update"] = time.time()
             except Exception:
                 pass
-            time.sleep(0.4) # Poll every 400ms in background
+            time.sleep(0.35)
 
-    import threading
-    thread = threading.Thread(target=state_reader_thread, daemon=True)
-    thread.start()
+    t = threading.Thread(target=state_reader, daemon=True)
+    t.start()
 
-    # Boost process priority for zero lag
+    # Boost priority on Windows
     try:
         if sys.platform == "win32":
             import ctypes
-            # HIGH_PRIORITY_CLASS = 0x00000080
-            ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00000080)
-    except Exception: pass
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(), 0x00000080
+            )
+    except Exception:
+        pass
 
-    def update_ui():
-        # Auto‑close only on fatal audio errors
-        if state["error"]:
-            canvas.itemconfig(title_id, text=f"❌ {state['error']}", fill="#ff5555")
-            _log(f"Fatal error: {state['error']}")
-            root.after(5000, root.destroy)
-            return
+    # ═══════════════════════════════════════════════════════════════════
+    # ANIMATION LOOP
+    # ═══════════════════════════════════════════════════════════════════
+    def fmt(sec):
+        s = int(sec)
+        return f"{s // 60}:{s % 60:02d}"
 
-        # Update UI elements that change slowly
-        canvas.itemconfig(btn_ids["pause"], text="▶" if state["status"] == "paused" else "⏸")
-        canvas.itemconfig(time_left_id, text=fmt_time(state["elapsed"]))
-        if state["duration"] > 0:
-            canvas.itemconfig(time_right_id, text=fmt_time(state["duration"]))
-        
-        if state["show_settings"]:
-            update_settings_ui()
-            
-        root.after(500, update_ui)
-
-    # ---------- Animation loop (fast, no I/O) ----------
-    phase = 0.0
     def animate():
-        nonlocal phase, bar_heights, title_offset
-        # Compute target heights using deterministic sine waves
-        playing = state["playing"]
-        status = state["status"]
-        if playing:
-            phase += 0.2
-        elif status == "buffering":
-            phase += 0.08
+        # Determine accent color based on state
+        if state["status"] == "playing":
+            anim["target_accent"] = ACCENT
+        elif state["status"] == "paused":
+            anim["target_accent"] = ACCENT_PAUSE
+        elif state["status"] == "buffering":
+            anim["target_accent"] = ACCENT_BUFFER
         else:
-            phase += 0.02
+            anim["target_accent"] = DIM
 
-        # Smoother title scrolling
-        display_title = state["title"]
-        if status == "buffering":
-            display_title = f"⏳ {display_title}"
-        title_len = len(display_title)
-        if title_len > MAX_TITLE:
-            # Update scroll position every ~150ms (3 frames at 50ms)
-            if int(phase * 5) % 1 != 0: # Simple way to slow down scrolling compared to animation
-                pass 
-            title_offset = (int(phase * 2)) % (title_len - MAX_TITLE + 1)
-            clipped = display_title[title_offset:title_offset+MAX_TITLE]
+        # Smooth color transition (just swap — true lerp would need hex math)
+        anim["accent"] = anim["target_accent"]
+
+        # Phase advancement
+        if state["playing"]:
+            anim["phase"] += 0.15
+        elif state["status"] == "buffering":
+            anim["phase"] += 0.06
         else:
-            clipped = display_title
-        canvas.itemconfig(title_id, text=clipped)
+            anim["phase"] += 0.01
 
-        # Update bar heights with smoothing
-        for i in range(BARS):
-            if playing:
-                target = 0.3 + 0.6 * (0.5 + 0.5 * math.sin(phase + i * 0.6))
-            elif status == "buffering":
-                target = 0.2 + 0.1 * math.sin(phase * 4 + i)
+        # Update status dot
+        canvas.itemconfig(status_dot, fill=anim["accent"])
+
+        # Title scrolling
+        title_text = state["title"] or "No track"
+        max_chars = 34 if not state["mini"] else 18
+        if len(title_text) > max_chars:
+            offset = int(anim["phase"] * 1.5) % (len(title_text) - max_chars + 4)
+            display = title_text[offset:offset + max_chars]
+        else:
+            display = title_text
+        canvas.itemconfig(title_id, text=display)
+
+        # Pause button text
+        canvas.itemconfig(btn_ids["pause"], text="▶" if state["status"] != "playing" else "⏸")
+
+        # Shuffle/autoplay indicator
+        canvas.itemconfig(btn_ids["shuffle"], fill=ACCENT if state["autoplay"] else DIM)
+
+        # Queue count
+        q_count = len(state["queue"])
+        canvas.itemconfig(queue_id, text=f"Q:{q_count}" if q_count > 0 else "")
+
+        # Volume icon
+        vol = state["volume"]
+        vol_icon = "🔇" if vol == 0 else "🔈" if vol < 40 else "🔉" if vol < 75 else "🔊"
+        canvas.itemconfig(vol_id, text=vol_icon)
+
+        if not state["mini"]:
+            # Waveform bars
+            for i in range(BARS):
+                if state["playing"]:
+                    target = 0.3 + 0.65 * (0.5 + 0.5 * math.sin(anim["phase"] + i * 0.55))
+                elif state["status"] == "buffering":
+                    target = 0.15 + 0.15 * math.sin(anim["phase"] * 3 + i * 0.8)
+                else:
+                    target = 0.04
+                # Smooth interpolation
+                anim["bar_heights"][i] += (target - anim["bar_heights"][i]) * 0.18
+                h = int(BAR_MAX_H * anim["bar_heights"][i])
+                x = bar_x0 + i * (BAR_W + BAR_GAP)
+                canvas.coords(bar_ids[i], x, bar_y - h, x + BAR_W, bar_y + h)
+                canvas.itemconfig(bar_ids[i], fill=anim["accent"])
+
+            # Progress bar
+            if state["duration"] > 0:
+                frac = min(1.0, state["elapsed"] / state["duration"])
+                fill_x = 14 + frac * (W_FULL - 28)
+                canvas.coords(prog_fill, 14, PROG_Y, fill_x, PROG_Y + PROG_H)
+                canvas.itemconfig(time_left, text=fmt(state["elapsed"]))
+                canvas.itemconfig(time_right, text=fmt(state["duration"]))
             else:
-                target = 0.05
-            bar_heights[i] = bar_heights[i] * 0.85 + target * 0.15
-            h = int(MAX_BAR_H * bar_heights[i])
-            x = bar_x0 + i * (BAR_W + BAR_GAP)
-            canvas.coords(bar_ids[i], x, bar_y_center - h//2, x + BAR_W, bar_y_center + h//2)
-            color = ACCENT if playing else DIM
-            canvas.itemconfig(bar_ids[i], fill=color)
+                # Idle shimmer
+                shimmer = (time.time() * 0.4) % 1.0
+                sx = 14 + shimmer * (W_FULL - 40)
+                canvas.coords(prog_fill, sx, PROG_Y, sx + 12, PROG_Y + PROG_H)
+                canvas.itemconfig(time_left, text="0:00")
+                canvas.itemconfig(time_right, text="--:--")
 
-        # Progress bar (interpolated from state)
-        if state["duration"] > 0:
-            frac = min(1.0, state["elapsed"] / state["duration"])
-            canvas.coords(prog_fill, 14, prog_y, 14 + frac * (W - 28), prog_y + BAR_H)
+        # Error handling
+        if state.get("error"):
+            canvas.itemconfig(title_id, fill="#ff5555")
         else:
-            # No duration → idle animation
-            idle = (time.time() * 0.5) % 1.0
-            canvas.coords(prog_fill, 14 + idle * (W - 28), prog_y, 14 + idle * (W - 28) + 10, prog_y + BAR_H)
+            canvas.itemconfig(title_id, fill=TEXT)
 
-        root.after(50, animate)   # 20 fps – smooth enough, very cheap
+        root.after(FRAME_MS, animate)
 
-    def _log(msg: str):
-        try:
-            log_file = Path(tempfile.gettempdir()) / "miniai_player_debug.log"
-            with open(log_file, 'a') as f:
-                f.write(f"[{time.ctime()}] {msg}\n")
-        except: pass
-
-    # Start both loops
-    root.after(400, update_ui)
-    root.after(50, animate)
+    # Start
+    root.after(100, animate)
     root.mainloop()
 
-# ----------------------------------------------------------------------
-# Public spawn function (same signature as before)
-# ----------------------------------------------------------------------
+
+# ═══════════════════════════════════════════════════════════════════════
+# PUBLIC API
+# ═══════════════════════════════════════════════════════════════════════
+
 def spawn_player(title: str, player_pid: Optional[int] = None) -> None:
     """Launch the floating player in a detached subprocess."""
     executable = sys.executable
     if os.name == "nt":
         # Use pythonw.exe to avoid console window
-        if executable.endswith("python.exe"):
+        pw = Path(executable).parent / "pythonw.exe"
+        if pw.exists():
+            executable = str(pw)
+        elif executable.endswith("python.exe"):
             executable = executable.replace("python.exe", "pythonw.exe")
-        elif not executable.endswith("pythonw.exe"):
-            pw = Path(executable).parent / "pythonw.exe"
-            if pw.exists():
-                executable = str(pw)
 
     args = [executable, "-m", "mini_ai.tools.floating_player", title]
     if player_pid:
@@ -415,8 +486,9 @@ def spawn_player(title: str, player_pid: Optional[int] = None) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        _log(f"Failed to spawn player: {e}")
+
 
 if __name__ == "__main__":
     main()

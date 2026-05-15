@@ -82,6 +82,25 @@ def warn(message: str) -> None:
     else:
         print(f"! {message}")
 
+def flow(label: str) -> None:
+    """Display a dim flow label showing which model/route handled the request."""
+    # Try each output method with full exception protection
+    if RICH_AVAILABLE:
+        for symbol in ("⟡ ", "> ", ""):
+            try:
+                console.print(f"[{C.muted}]{symbol}{label}[/{C.muted}]")
+                return
+            except Exception:
+                continue
+    # Fallback to stdlib print with ASCII-safe encoding
+    try:
+        print(f"  [{label}]")
+    except UnicodeEncodeError:
+        try:
+            print(f"  [{label.encode('ascii', 'replace').decode('ascii')}]")
+        except Exception:
+            pass
+
 def status(message: str) -> Union[Optional[Status], Any]:
     """Return a context manager for status updates."""
     if RICH_AVAILABLE:

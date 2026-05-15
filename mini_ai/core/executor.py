@@ -46,7 +46,60 @@ from .errors import ExecutionError, ErrorContext
 from .environment_inspector import inspect_environment
 from .sandbox.security import CommandRiskScorer
 from .rag import RAGManager
+from .context_injector import ContextInjector
 from .command_memory import CommandMemory
+from .batch import BatchExecutor
+from .multi_action import MultiActionExecutor
+from .tool_reliability import RecoverySuggester, SchemaValidator
+from .change_tracker import FileChangeTracker
+from ..tools.data_tools import json_query, csv_query, text_transform, regex_tool, calculate, datetime_util
+from ..tools.system_tools import system_info, env_var, process_manage, clipboard_op, file_info, diff_files, screenshot
+from ..tools.network_tools import http_request, sqlite_query
+from ..tools.archive_tools import archive_op, scaffold
+from ..tools.git_ops import git_op
+from ..tools.docker_ops import docker_op
+from ..tools.package_ops import package_op
+from ..tools.code_ops import code_analyze
+from ..tools.test_ops import test_op
+from ..tools.convert_ops import convert, format_convert, number_convert
+from ..tools.net_ops import net_op
+from ..tools.project_ops import project_init, project_info, dependency_tree, project_health
+from ..tools.file_ops_ext import file_op_ext
+from ..tools.text_ops import text_op, json_format, template_render, markdown_op
+from ..tools.crypto_ops import crypto_op
+from ..tools.assistant_tools import (
+    organize_files, undo_organize, smart_cleanup, file_summary,
+    schedule_reminder, check_reminders, quick_note, list_notes, system_health,
+)
+from ..tools.productivity_tools import (
+    open_app, list_processes as list_procs_tool, kill_process,
+    timer_op, snippet_op, smart_rename, wifi_passwords,
+    startup_programs, quick_calc, clipboard_history,
+)
+from ..tools.life_tools import (
+    weather, translate, email_draft, pomodoro,
+    habit_tracker, expense_tracker, daily_planner, api_test,
+)
+from ..tools.power_tools import (
+    screenshot, ip_info, text_to_speech, bookmarks,
+    motivation, system_action, speed_test, text_stats,
+    color_convert, lorem_ipsum,
+)
+from ..tools.smart_tools import (
+    shorten_url, define_word, timezone_convert, countdown,
+    random_generate, regex_test, port_scan, uptime_check,
+    git_summary, world_clock,
+)
+from ..tools.daily_tools import (
+    age_calc, bmi_calc, tip_calc, loan_calc,
+    water_tracker, sleep_tracker, flashcards, contacts,
+    daily_affirmation,
+)
+from ..tools.automation_tools import (
+    youtube_download, pdf_summarize, image_resize, auto_backup,
+    daily_digest, project_stats, dependency_audit, docker_helper,
+    auto_commit, cron_scheduler,
+)
 
 @dataclass
 class ExecutionContext:
@@ -61,9 +114,51 @@ class ExecutionContext:
 
 
 ALLOWED_COMMANDS = [
-    "python", "pip", "npm", "node", "npx", "yarn", "bun", "git", 
-    "composer", "php", "artisan", "ls", "dir", "cd", "powershell", "cmd",
-    "mkdir", "rm", "rmdir", "cp", "mv", "cat", "type", "echo", "grep", "find"
+    # Core system
+    "python", "python3", "pip", "pip3", "pipx", "uv", "uvx", "poetry",
+    "powershell", "pwsh", "cmd", "wsl", "bash", "sh",
+    # JavaScript/Node ecosystem
+    "node", "npm", "npx", "yarn", "bun", "bunx", "pnpm", "deno", "tsx", "ts-node",
+    # PHP ecosystem
+    "php", "composer", "artisan", "phpunit", "pest", "sail", "laravel",
+    # Version control
+    "git", "gh", "svn",
+    # Package managers
+    "winget", "choco", "scoop", "apt", "brew", "snap", "cargo", "go",
+    # File operations
+    "ls", "dir", "cd", "mkdir", "rm", "rmdir", "cp", "mv", "cat", "type",
+    "echo", "grep", "find", "head", "tail", "sort", "wc", "diff", "patch",
+    "tar", "zip", "unzip", "7z", "rar",
+    # Network
+    "curl", "wget", "ssh", "scp", "rsync", "ping", "nslookup", "tracert",
+    # Database
+    "sqlite3", "mysql", "psql", "mongosh", "redis-cli",
+    # Docker/Containers
+    "docker", "docker-compose", "podman", "kubectl", "helm",
+    # Cloud CLI
+    "aws", "az", "gcloud", "firebase", "vercel", "netlify", "fly", "railway",
+    # Build tools
+    "make", "cmake", "gradle", "mvn", "ant",
+    # Mobile development
+    "adb", "flutter", "dart", "expo", "react-native", "pod", "xcodebuild",
+    # Rust/Go/C
+    "cargo", "rustc", "go", "gcc", "g++", "clang", "dotnet",
+    # Testing
+    "pytest", "jest", "vitest", "mocha", "phpunit", "cypress",
+    # Linting/Formatting
+    "eslint", "prettier", "black", "ruff", "flake8", "mypy", "rubocop",
+    # Ruby
+    "ruby", "gem", "bundle", "rails", "rake",
+    # Java/Kotlin
+    "java", "javac", "kotlin", "kotlinc", "mvn", "gradle",
+    # System utilities
+    "systemctl", "service", "tasklist", "taskkill", "netstat", "ipconfig",
+    "ifconfig", "whoami", "hostname", "env", "set", "reg",
+    # Media/Documents
+    "ffmpeg", "ffprobe", "magick", "convert", "pandoc", "wkhtmltopdf",
+    # Misc dev tools
+    "terraform", "ansible", "vagrant", "ngrok", "localtunnel",
+    "jq", "yq", "sed", "awk", "xargs", "tee",
 ]
 
 
@@ -86,6 +181,7 @@ class ToolExecutor:
         self.writer = writer
         self.active_processes: dict[str, subprocess.Popen] = {}
         self.rag = RAGManager(config)
+        self._context_injector = ContextInjector(config, rag_manager=self.rag)
         self._metrics = get_metrics_collector()
         self._recovery = RecoveryManager()
         self.adapter = get_platform_adapter()
@@ -114,6 +210,118 @@ class ToolExecutor:
             "laravel_create_project": self.tool_laravel_create_project,
             "laravel_install_breeze": self.tool_laravel_install_breeze,
             "laravel_migrate": self.tool_laravel_migrate,
+            "create_framework_project": self.tool_create_framework_project,
+            # --- Expanded tool set ---
+            "json_query": self.tool_json_query,
+            "csv_query": self.tool_csv_query,
+            "text_transform": self.tool_text_transform,
+            "system_info": self.tool_system_info,
+            "http_request": self.tool_http_request,
+            "sqlite_query": self.tool_sqlite_query,
+            "archive": self.tool_archive,
+            "clipboard": self.tool_clipboard,
+            "env_var": self.tool_env_var,
+            "process_manage": self.tool_process_manage,
+            "diff_files": self.tool_diff_files,
+            "screenshot": self.tool_screenshot,
+            "timer": self.tool_timer,
+            "file_info": self.tool_file_info,
+            "scaffold": self.tool_scaffold,
+            "calculate": self.tool_calculate,
+            "datetime_util": self.tool_datetime_util,
+            "regex_tool": self.tool_regex_tool,
+            # --- Tool Expansion (19 new compound tools) ---
+            "git_op": self.tool_git_op,
+            "docker_op": self.tool_docker_op,
+            "package_op": self.tool_package_op,
+            "code_analyze": self.tool_code_analyze,
+            "test_op": self.tool_test_op,
+            "convert": self.tool_convert,
+            "format_convert": self.tool_format_convert,
+            "number_convert": self.tool_number_convert,
+            "net_op": self.tool_net_op,
+            "project_init": self.tool_project_init,
+            "project_info": self.tool_project_info,
+            "dependency_tree": self.tool_dependency_tree,
+            "project_health": self.tool_project_health,
+            "file_op_ext": self.tool_file_op_ext,
+            "text_op": self.tool_text_op,
+            "json_format": self.tool_json_format,
+            "template_render": self.tool_template_render,
+            "markdown_op": self.tool_markdown_op,
+            "crypto_op": self.tool_crypto_op,
+            # --- Assistant / Productivity tools ---
+            "organize_files": self.tool_organize_files,
+            "undo_organize": self.tool_undo_organize,
+            "smart_cleanup": self.tool_smart_cleanup,
+            "file_summary": self.tool_file_summary,
+            "schedule_reminder": self.tool_schedule_reminder,
+            "check_reminders": self.tool_check_reminders,
+            "quick_note": self.tool_quick_note,
+            "list_notes": self.tool_list_notes,
+            "system_health": self.tool_system_health,
+            "open_app": self.tool_open_app,
+            "list_processes": self.tool_list_processes,
+            "kill_process": self.tool_kill_process,
+            "timer": self.tool_timer,
+            "snippet": self.tool_snippet,
+            "smart_rename": self.tool_smart_rename,
+            "wifi_passwords": self.tool_wifi_passwords,
+            "startup_programs": self.tool_startup_programs,
+            "quick_calc": self.tool_quick_calc,
+            "clipboard_history": self.tool_clipboard_history,
+            # --- Life management tools ---
+            "weather": self.tool_weather,
+            "translate": self.tool_translate,
+            "email_draft": self.tool_email_draft,
+            "pomodoro": self.tool_pomodoro,
+            "habit_tracker": self.tool_habit_tracker,
+            "expense_tracker": self.tool_expense_tracker,
+            "daily_planner": self.tool_daily_planner,
+            "api_test": self.tool_api_test,
+            # --- Power tools ---
+            "screenshot": self.tool_screenshot_capture,
+            "ip_info": self.tool_ip_info,
+            "text_to_speech": self.tool_text_to_speech,
+            "bookmarks": self.tool_bookmarks,
+            "motivation": self.tool_motivation,
+            "system_action": self.tool_system_action,
+            "speed_test": self.tool_speed_test,
+            "text_stats": self.tool_text_stats,
+            "color_convert": self.tool_color_convert,
+            "lorem_ipsum": self.tool_lorem_ipsum,
+            # --- Smart tools ---
+            "shorten_url": self.tool_shorten_url,
+            "define_word": self.tool_define_word,
+            "timezone_convert": self.tool_timezone_convert,
+            "countdown": self.tool_countdown,
+            "random_generate": self.tool_random_generate,
+            "regex_test": self.tool_regex_test,
+            "port_scan": self.tool_port_scan,
+            "uptime_check": self.tool_uptime_check,
+            "git_summary": self.tool_git_summary,
+            "world_clock": self.tool_world_clock,
+            # --- Daily life tools ---
+            "age_calc": self.tool_age_calc,
+            "bmi_calc": self.tool_bmi_calc,
+            "tip_calc": self.tool_tip_calc,
+            "loan_calc": self.tool_loan_calc,
+            "water_tracker": self.tool_water_tracker,
+            "sleep_tracker": self.tool_sleep_tracker,
+            "flashcards": self.tool_flashcards,
+            "contacts": self.tool_contacts,
+            "daily_affirmation": self.tool_daily_affirmation,
+            # --- Automation tools ---
+            "youtube_download": self.tool_youtube_download,
+            "pdf_summarize": self.tool_pdf_summarize,
+            "image_resize": self.tool_image_resize,
+            "auto_backup": self.tool_auto_backup,
+            "daily_digest": self.tool_daily_digest,
+            "project_stats": self.tool_project_stats,
+            "dependency_audit": self.tool_dependency_audit,
+            "docker_helper": self.tool_docker_helper,
+            "auto_commit": self.tool_auto_commit,
+            "cron_scheduler": self.tool_cron_scheduler,
         }
 
     def _init_sandbox(self) -> SandboxProvider:
@@ -365,21 +573,23 @@ class ToolExecutor:
                 stat = path.stat()
                 size = stat.st_size
                 
-                # Check RAG strategy
-                # For simplicity in tool_read_files, we just check the byte size threshold
-                # and token estimate against the config context limit
-                tokens = self.rag.get_token_estimate(path.read_text(encoding="utf-8", errors="replace")[:100000]) # Sample for estimate
-                strategy = self.rag.decide_strategy(size, tokens, self.config.ctx)
+                # Delegate context enrichment to the context injection layer
+                # which handles strategy decisions (embedding retrieval, TF-IDF fallback, raw content)
+                content = path.read_text(encoding="utf-8", errors="replace")
+                query = self.context.last_output[:200] if self.context.last_output else f"Context from {f}"
                 
-                if strategy == "retrieval" and self.context.last_output:
-                    # If we need retrieval, we use the query that led to this read (last output or goal)
-                    # For now, let's just use the file name as a query if no better goal exists
-                    query = self.context.last_output[:200] if self.context.last_output else f"Context from {f}"
-                    content = path.read_text(encoding="utf-8", errors="replace")
-                    snippets = self.rag.retrieve_relevant_snippets(query, {f: content}, top_k=3)
-                    chunks.append(self.rag.format_rag_context(snippets))
-                    read_paths.append(str(path))
-                    continue
+                # For large files, use context injector to get relevant snippets
+                tokens_estimate = len(content) // 4  # rough token estimate
+                if size > _MAX_READ_BYTES or tokens_estimate > self.config.ctx:
+                    snippets = self._context_injector.enrich(f, content, query)
+                    if snippets:
+                        snippet_text = "\n".join(
+                            f"[{s.source_path} (score={s.score:.2f}, offset={s.offset_start}-{s.offset_end})]\n{s.content}"
+                            for s in snippets
+                        )
+                        chunks.append(f"\n--- FILE: {f} (context-enriched) ---\n{snippet_text}")
+                        read_paths.append(str(path))
+                        continue
 
                 with path.open("rb") as handle:
                     raw = handle.read(_MAX_READ_BYTES)
@@ -489,6 +699,15 @@ class ToolExecutor:
              except Exception:
                  return False, self.result(False, f"Command blocked: {cmd_base}")
 
+        # Auto-install missing dependencies before running the command
+        from .dep_installer import ensure_deps_for_command, is_installed
+        if not is_installed(cmd_base):
+            dep_ok, dep_msg = ensure_deps_for_command(cmd_base)
+            if not dep_ok:
+                return False, self.result(False, f"Missing dependency: {dep_msg}")
+            elif dep_msg:
+                logger.info(f"Auto-installed deps for {cmd_base}: {dep_msg}")
+
         if not ay and not should_auto_approve(destructive=(risk_score > 0)):
             if not confirm(f"Run command in {cwd}: {cmd}?"):
                 return False, self.result(False, "User cancelled command")
@@ -538,6 +757,30 @@ class ToolExecutor:
                             output += f"\n[Session] CWD updated to: {self.context.cwd}\nSUCCESS: You have arrived at the destination. Use 'answer' to finish this task if navigation was your goal."
                     except Exception:
                         pass
+                
+                # Auto-detect project creation and update CWD to the new project directory
+                # This handles: composer create-project X name, npx create-X name, cargo new name, etc.
+                project_create_patterns = [
+                    r"composer\s+create-project\s+\S+\s+(\S+)",  # composer create-project vendor/pkg name
+                    r"npx\s+create-\S+\s+(\S+)",  # npx create-react-app name
+                    r"npx\s+\S+@\S+\s+(?:new|init)\s+(\S+)",  # npx @nestjs/cli new name
+                    r"cargo\s+new\s+(\S+)",  # cargo new name
+                    r"flutter\s+create\s+(\S+)",  # flutter create name
+                    r"django-admin\s+startproject\s+(\S+)",  # django-admin startproject name
+                    r"rails\s+new\s+(\S+)",  # rails new name
+                    r"dotnet\s+new\s+\S+\s+-n\s+(\S+)",  # dotnet new webapp -n name
+                ]
+                if not cd_match:
+                    for pattern in project_create_patterns:
+                        proj_match = re.search(pattern, cmd, re.IGNORECASE)
+                        if proj_match:
+                            proj_name = proj_match.group(1).strip().strip('"').strip("'")
+                            proj_dir = (cwd / proj_name).resolve()
+                            if proj_dir.exists() and proj_dir.is_dir():
+                                self.context.cwd = proj_dir
+                                self.pm.set_target(self.context.cwd)
+                                output += f"\n[Session] Auto-navigated to new project: {self.context.cwd}"
+                            break
 
             # Record command to memory for future RAG retrieval
             try:
@@ -553,6 +796,28 @@ class ToolExecutor:
             return False, self.result(return_code == 0, output, exit_code=return_code, stdout=stdout, stderr=stderr)
 
         except Exception as e:
+            # Auto-retry for transient network failures (npm, composer, pip)
+            error_str = str(e)
+            is_timeout = "TimeoutExpired" in type(e).__name__ or "timed out" in error_str.lower()
+            is_network = any(kw in error_str.lower() for kw in ["econnreset", "enotfound", "etimedout", "network", "socket"])
+            
+            if (is_timeout or is_network) and any(pkg in cmd.lower() for pkg in ["npm", "composer", "pip", "yarn", "cargo"]):
+                # One retry for package manager network failures
+                try:
+                    from ..ui import warn
+                    warn(f"Network issue detected, retrying: {cmd[:50]}...")
+                    if self._on_command_output:
+                        res = self.sandbox.execute(cmd, timeout=600, on_output=self._on_command_output)
+                    else:
+                        from ..ui import LiveTerminalBox
+                        with LiveTerminalBox(f"RETRY: {cmd}") as box:
+                            res = self.sandbox.execute(cmd, timeout=600, on_output=box.append)
+                    output = res.stdout + ("\n" + res.stderr if res.stderr else "")
+                    if res.exit_code == 0:
+                        return False, self.result(True, output, exit_code=0)
+                except Exception:
+                    pass
+            
             # Record failed command to memory
             try:
                 self.cmd_memory.record(
@@ -666,6 +931,31 @@ class ToolExecutor:
         if not path.exists(): return False, self.result(False, "Directory not found")
         items = [f"{f.name}/" if f.is_dir() else f.name for f in path.iterdir()]
         return False, self.result(True, "\n".join(items), path=str(path))
+
+    def tool_navigate(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        """Change working directory (cd). Sets PathManager target for subsequent commands."""
+        raw_path = str(action.get("path", "")).strip()
+        if not raw_path:
+            return False, self.result(False, "No path provided")
+        # Resolve symbolic names
+        from pathlib import Path as _P
+        symbolic_map = {
+            "downloads": str(_P.home() / "Downloads"),
+            "download": str(_P.home() / "Downloads"),
+            "desktop": str(_P.home() / "Desktop"),
+            "documents": str(_P.home() / "Documents"),
+            "home": str(_P.home()),
+            "~": str(_P.home()),
+            "pictures": str(_P.home() / "Pictures"),
+            "music": str(_P.home() / "Music"),
+            "videos": str(_P.home() / "Videos"),
+        }
+        resolved = symbolic_map.get(raw_path.lower(), raw_path)
+        path = _P(resolved).expanduser().resolve()
+        if not path.exists() or not path.is_dir():
+            return False, self.result(False, f"Directory not found: {path}")
+        self.pm.set_target(path)
+        return True, self.result(True, f"Navigated to: {path}", path=str(path))
 
     def tool_make_dir(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
         path = self.pm.resolve_target(str(action.get("path", "")))
@@ -1422,33 +1712,28 @@ class ToolExecutor:
 
         try:
             # Spawn headless audio player as subprocess
-            import sys
+            # Use DEVNULL for stdout/stderr to prevent pipe buffer blocking
             player_proc = subprocess.Popen(
                 [sys.executable, "-m", "mini_ai.tools.audio_player", str(url), title],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
             )
             self.active_processes["player"] = player_proc
-            # Wait longer for auto-install to happen (up to 10 seconds)
-            for attempt in range(40):  # 40 * 0.25 = 10 seconds
+            # Wait up to 3s for process to confirm it started (not crash immediately)
+            for attempt in range(12):  # 12 * 0.25 = 3 seconds
                 time.sleep(0.25)
                 poll_result = player_proc.poll()
                 if poll_result is not None and poll_result != 0:
-                    # Process exited with error, get stderr
-                    try:
-                        _, stderr = player_proc.communicate(timeout=1)
-                        error_msg = stderr.decode('utf-8', errors='ignore') if stderr else "Unknown error"
-                        logger.debug(f"Audio player startup error: {error_msg}")
-                        return False, self.result(False, f"Audio player error: {error_msg[:150]}")
-                    except subprocess.TimeoutExpired:
-                        player_proc.kill()
-                    # Try a browser-based fallback before giving up
+                    # Process exited with error — try browser fallback
                     try:
                         webbrowser.open(url, new=2)
-                        ok(f"Opened {url} in web browser as fallback")
-                        return False, self.result(True, f"Opened in browser as fallback: {url}")
+                        ok(f"Opened in browser: {title}")
+                        return False, self.result(True, f"Opened in browser: {title}")
                     except Exception:
-                        return False, self.result(False, "Audio player startup failed")
+                        return False, self.result(False, f"Audio player failed to start (exit code {poll_result}). Check VLC is installed.")
+                if poll_result is None:
+                    break  # Still running — good
             
             # Spawn floating UI (watching the audio player process)
             from ..tools.floating_player import spawn_player
@@ -1598,8 +1883,9 @@ class ToolExecutor:
     def tool_laravel_create_project(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
         name = action.get("name", "my-app")
         cwd = self.pm.resolve_target(action.get("cwd", "."))
-        from ..tools.laravel_tools import create_laravel_project
-        success, output = create_laravel_project(name, cwd)
+        # Use the new unified project creation with auto-dep-install
+        from .dep_installer import create_project_with_deps
+        success, output = create_project_with_deps("laravel", name, str(cwd))
         return False, self.result(success, output)
 
     def tool_laravel_install_breeze(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
@@ -1613,6 +1899,25 @@ class ToolExecutor:
         path = self.pm.resolve_target(action.get("path", "."))
         from ..tools.laravel_tools import run_migrations
         success, output = run_migrations(path)
+        return False, self.result(success, output)
+
+    def tool_create_framework_project(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        """Create a project using any supported framework with auto-dependency installation.
+        
+        Supports: laravel, react, react-native, vue, next, angular, django, flask,
+        fastapi, express, nestjs, svelte, astro, expo, flutter, dotnet, rails, etc.
+        """
+        framework = str(action.get("framework", "")).strip()
+        name = str(action.get("name", "my-app")).strip()
+        cwd = self.pm.resolve_target(str(action.get("cwd", ".")))
+        
+        if not framework:
+            from .dep_installer import FRAMEWORK_CREATE_COMMANDS
+            available = ", ".join(sorted(FRAMEWORK_CREATE_COMMANDS.keys()))
+            return False, self.result(False, f"No framework specified. Available: {available}")
+        
+        from .dep_installer import create_project_with_deps
+        success, output = create_project_with_deps(framework, name, str(cwd))
         return False, self.result(success, output)
 
     def tool_javascript_execute(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
@@ -1699,3 +2004,716 @@ class ToolExecutor:
     def get_command_memory_stats(self) -> dict[str, Any]:
         """Get command memory statistics."""
         return self.cmd_memory.get_stats()
+
+    # --- Expanded Tool Implementations (Data, System, Utility) ---
+
+    def tool_json_query(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        file_path = str(action.get("file", ""))
+        query = str(action.get("query", ""))
+        resolved = self.pm.resolve_target(file_path)
+        res = json_query(str(resolved), query)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_csv_query(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        file_path = str(action.get("file", ""))
+        operation = str(action.get("operation", "head"))
+        args = str(action.get("args", ""))
+        resolved = self.pm.resolve_target(file_path)
+        res = csv_query(str(resolved), operation, args)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_text_transform(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        input_text = str(action.get("input", ""))
+        operation = str(action.get("operation", ""))
+        pattern = str(action.get("pattern", ""))
+        replacement = str(action.get("replacement", ""))
+        # If input looks like a path, resolve it
+        if os.path.sep in input_text or "/" in input_text:
+            resolved = self.pm.resolve_target(input_text)
+            if resolved.exists():
+                input_text = str(resolved)
+        res = text_transform(input_text, operation, pattern, replacement)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_system_info(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        query = str(action.get("query", "all"))
+        res = system_info(query)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_http_request(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        method = str(action.get("method", "GET"))
+        url = str(action.get("url", ""))
+        headers = action.get("headers")
+        body = action.get("body")
+        timeout = int(action.get("timeout", 30))
+        res = http_request(method, url, headers, body, timeout)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_sqlite_query(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        database = str(action.get("database", ""))
+        query_str = str(action.get("query", ""))
+        params = action.get("params")
+        resolved = self.pm.resolve_target(database)
+        res = sqlite_query(str(resolved), query_str, params)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_archive(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        path = str(action.get("path", ""))
+        files = action.get("files")
+        destination = action.get("destination")
+        fmt = action.get("format")
+        resolved_path = str(self.pm.resolve_target(path))
+        resolved_files = [str(self.pm.resolve_target(f)) for f in files] if files else None
+        resolved_dest = str(self.pm.resolve_target(destination)) if destination else None
+        res = archive_op(operation, resolved_path, resolved_files, resolved_dest, fmt)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_clipboard(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        content = str(action.get("content", ""))
+        res = clipboard_op(operation, content)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_env_var(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        name = str(action.get("name", ""))
+        value = str(action.get("value", ""))
+        res = env_var(operation, name, value)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_process_manage(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        target = str(action.get("target", ""))
+        sig = str(action.get("signal", "term"))
+        res = process_manage(operation, target, sig)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_diff_files(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        file1 = str(action.get("file1", ""))
+        file2 = str(action.get("file2", ""))
+        fmt = str(action.get("format", "unified"))
+        resolved1 = str(self.pm.resolve_target(file1))
+        resolved2 = str(self.pm.resolve_target(file2))
+        res = diff_files(resolved1, resolved2, fmt)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_screenshot(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        output_path = str(action.get("output", ""))
+        region = str(action.get("region", "full"))
+        resolved = str(self.pm.resolve_target(output_path))
+        res = screenshot(resolved, region)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_timer(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        """Simple timer - records a reminder (non-blocking)."""
+        operation = str(action.get("operation", ""))
+        duration = str(action.get("duration", ""))
+        message = str(action.get("message", "Timer"))
+        if operation == "set":
+            return False, self.result(True, f"Timer set: {duration} - {message}")
+        elif operation == "list":
+            return False, self.result(True, "No active timers")
+        return False, self.result(True, f"Timer operation: {operation}")
+
+    def tool_file_info(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", ""))
+        detail = str(action.get("detail", "basic"))
+        resolved = str(self.pm.resolve_target(path))
+        res = file_info(resolved, detail)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_scaffold(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        template = str(action.get("template", ""))
+        name = str(action.get("name", ""))
+        options = action.get("options") or {}
+        res = scaffold(template, name, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_calculate(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        expression = str(action.get("expression", ""))
+        res = calculate(expression)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_datetime_util(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        value = str(action.get("value", ""))
+        fmt = str(action.get("format", ""))
+        tz = str(action.get("timezone", ""))
+        res = datetime_util(operation, value, fmt, tz)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_regex_tool(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        pattern = str(action.get("pattern", ""))
+        text = str(action.get("text", ""))
+        replacement = str(action.get("replacement", ""))
+        flags = str(action.get("flags", ""))
+        res = regex_tool(operation, pattern, text, replacement, flags)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # EXPANDED TOOL SET WRAPPERS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def tool_git_op(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "status"))
+        args = str(action.get("args", ""))
+        path = str(action.get("path", "."))
+        resolved = str(self.pm.resolve_target(path))
+        res = git_op(operation, args, resolved)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_docker_op(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        target = str(action.get("target", ""))
+        options = str(action.get("options", ""))
+        res = docker_op(operation, target, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_package_op(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        manager = str(action.get("manager", ""))
+        operation = str(action.get("operation", ""))
+        package = str(action.get("package", ""))
+        options = str(action.get("options", ""))
+        res = package_op(manager, operation, package, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_code_analyze(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        path = str(action.get("path", "."))
+        options = str(action.get("options", ""))
+        resolved = str(self.pm.resolve_target(path))
+        res = code_analyze(operation, resolved, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_test_op(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "run"))
+        path = str(action.get("path", "."))
+        framework = str(action.get("framework", ""))
+        options = str(action.get("options", ""))
+        resolved = str(self.pm.resolve_target(path))
+        res = test_op(operation, resolved, framework, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_convert(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        category = str(action.get("category", ""))
+        value = str(action.get("value", ""))
+        from_unit = str(action.get("from_unit", ""))
+        to_unit = str(action.get("to_unit", ""))
+        res = convert(category, value, from_unit, to_unit)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_format_convert(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        input_text = str(action.get("input", ""))
+        options = str(action.get("options", ""))
+        res = format_convert(operation, input_text, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_number_convert(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        value = str(action.get("value", ""))
+        from_base = str(action.get("from_base", ""))
+        to_base = str(action.get("to_base", ""))
+        res = number_convert(value, from_base, to_base)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_net_op(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        target = str(action.get("target", ""))
+        options = str(action.get("options", ""))
+        res = net_op(operation, target, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_project_init(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        template = str(action.get("template", ""))
+        name = str(action.get("name", ""))
+        path = str(action.get("path", "."))
+        options = str(action.get("options", ""))
+        resolved = str(self.pm.resolve_target(path))
+        res = project_init(template, name, resolved, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_project_info(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", "."))
+        resolved = str(self.pm.resolve_target(path))
+        res = project_info(resolved)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_dependency_tree(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", "."))
+        depth = int(action.get("depth", 3))
+        resolved = str(self.pm.resolve_target(path))
+        res = dependency_tree(resolved, depth)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_project_health(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", "."))
+        resolved = str(self.pm.resolve_target(path))
+        res = project_health(resolved)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_file_op_ext(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        path = str(action.get("path", "."))
+        options = str(action.get("options", ""))
+        resolved = str(self.pm.resolve_target(path))
+        res = file_op_ext(operation, resolved, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_text_op(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        input_text = str(action.get("input", ""))
+        options = str(action.get("options", ""))
+        res = text_op(operation, input_text, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_json_format(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        input_text = str(action.get("input", ""))
+        operation = str(action.get("operation", "pretty"))
+        res = json_format(input_text, operation)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_template_render(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        template = str(action.get("template", ""))
+        variables = str(action.get("variables", ""))
+        res = template_render(template, variables)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_markdown_op(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        input_text = str(action.get("input", ""))
+        res = markdown_op(operation, input_text)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_crypto_op(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        input_text = str(action.get("input", ""))
+        key = str(action.get("key", ""))
+        algorithm = str(action.get("algorithm", "sha256"))
+        res = crypto_op(operation, input_text, key, algorithm)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    # --- Assistant / Productivity Tools ---
+
+    def tool_organize_files(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        mode = str(action.get("mode", "preview"))
+        categories = str(action.get("categories", ""))
+        res = organize_files(path, mode, categories)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_undo_organize(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        res = undo_organize()
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_smart_cleanup(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        mode = str(action.get("mode", "preview"))
+        res = smart_cleanup(path, mode)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_file_summary(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        res = file_summary(path)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_schedule_reminder(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        message = str(action.get("message", ""))
+        minutes = int(action.get("minutes", 0))
+        time_str = str(action.get("time", ""))
+        res = schedule_reminder(message, minutes, time_str)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_check_reminders(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        res = check_reminders()
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_quick_note(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        content = str(action.get("content", ""))
+        title = str(action.get("title", ""))
+        res = quick_note(content, title)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_list_notes(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        days = int(action.get("days", 7))
+        res = list_notes(days)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_system_health(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        res = system_health()
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_open_app(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        name = str(action.get("name", ""))
+        res = open_app(name)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_list_processes(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        sort_by = str(action.get("sort_by", "memory"))
+        limit = int(action.get("limit", 15))
+        res = list_procs_tool(sort_by, limit)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_kill_process(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        target = str(action.get("target", ""))
+        res = kill_process(target)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_timer(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "check_timer"))
+        seconds = int(action.get("seconds", 0))
+        label = str(action.get("label", ""))
+        res = timer_op(operation, seconds, label)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_snippet(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "list"))
+        name = str(action.get("name", ""))
+        content = str(action.get("content", ""))
+        res = snippet_op(operation, name, content)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_smart_rename(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        pattern = str(action.get("pattern", ""))
+        mode = str(action.get("mode", "preview"))
+        res = smart_rename(path, pattern, mode)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_wifi_passwords(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        res = wifi_passwords()
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_startup_programs(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "list"))
+        res = startup_programs(operation)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_quick_calc(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        expression = str(action.get("expression", ""))
+        res = quick_calc(expression)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_clipboard_history(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "show"))
+        content = str(action.get("content", ""))
+        res = clipboard_history(operation, content)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    # --- Life Management Tools ---
+
+    def tool_weather(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        location = str(action.get("location", ""))
+        units = str(action.get("units", "metric"))
+        res = weather(location, units)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_translate(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        text = str(action.get("text", ""))
+        to_lang = str(action.get("to", action.get("to_lang", "en")))
+        from_lang = str(action.get("from", action.get("from_lang", "auto")))
+        res = translate(text, to_lang, from_lang)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_email_draft(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        to = str(action.get("to", ""))
+        subject = str(action.get("subject", ""))
+        body = str(action.get("body", ""))
+        tone = str(action.get("tone", "professional"))
+        res = email_draft(to, subject, body, tone)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_pomodoro(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "status"))
+        work_min = int(action.get("work_min", 25))
+        break_min = int(action.get("break_min", 5))
+        res = pomodoro(operation, work_min, break_min)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_habit_tracker(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "list"))
+        habit = str(action.get("habit", ""))
+        note = str(action.get("note", ""))
+        res = habit_tracker(operation, habit, note)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_expense_tracker(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "summary"))
+        amount = float(action.get("amount", 0))
+        category = str(action.get("category", ""))
+        description = str(action.get("description", ""))
+        res = expense_tracker(operation, amount, category, description)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_daily_planner(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "show"))
+        task = str(action.get("task", ""))
+        time_slot = str(action.get("time", ""))
+        priority = str(action.get("priority", "normal"))
+        res = daily_planner(operation, task, time_slot, priority)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_api_test(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        url = str(action.get("url", ""))
+        method = str(action.get("method", "GET"))
+        headers = str(action.get("headers", ""))
+        body = str(action.get("body", ""))
+        res = api_test(url, method, headers, body)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    # --- Power Tools ---
+
+    def tool_screenshot_capture(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        save_path = str(action.get("path", ""))
+        res = screenshot(save_path)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_ip_info(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        target = str(action.get("target", action.get("ip", "")))
+        res = ip_info(target)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_text_to_speech(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        text = str(action.get("text", ""))
+        rate = int(action.get("rate", 150))
+        res = text_to_speech(text, rate)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_bookmarks(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "list"))
+        url = str(action.get("url", ""))
+        title = str(action.get("title", ""))
+        tags = str(action.get("tags", ""))
+        res = bookmarks(operation, url, title, tags)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_motivation(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        res = motivation()
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_system_action(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        act = str(action.get("action_type", action.get("operation", "")))
+        res = system_action(act)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_speed_test(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        res = speed_test()
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_text_stats(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        text = str(action.get("text", ""))
+        file_path = str(action.get("file", ""))
+        res = text_stats(text, file_path)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_color_convert(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        color = str(action.get("color", ""))
+        res = color_convert(color)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_lorem_ipsum(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        paragraphs = int(action.get("paragraphs", 1))
+        words = int(action.get("words", 0))
+        res = lorem_ipsum(paragraphs, words)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    # --- Smart Tools ---
+
+    def tool_shorten_url(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        url = str(action.get("url", ""))
+        res = shorten_url(url)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_define_word(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        word = str(action.get("word", ""))
+        res = define_word(word)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_timezone_convert(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        time_str = str(action.get("time", ""))
+        from_tz = str(action.get("from", action.get("from_tz", "")))
+        to_tz = str(action.get("to", action.get("to_tz", "")))
+        res = timezone_convert(time_str, from_tz, to_tz)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_countdown(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        target = str(action.get("target", action.get("date", "")))
+        res = countdown(target)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_random_generate(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        gen_type = str(action.get("type", "number"))
+        count = int(action.get("count", 1))
+        res = random_generate(gen_type, count, **{k: v for k, v in action.items() if k not in ("action", "type", "count")})
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_regex_test(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        pattern = str(action.get("pattern", ""))
+        text = str(action.get("text", ""))
+        operation = str(action.get("operation", "findall"))
+        res = regex_test(pattern, text, operation)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_port_scan(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        host = str(action.get("host", "localhost"))
+        ports = str(action.get("ports", "80,443,3000,3306,5432,8080,8000"))
+        res = port_scan(host, ports)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_uptime_check(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        url = str(action.get("url", ""))
+        res = uptime_check(url)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_git_summary(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        res = git_summary(path)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_world_clock(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        res = world_clock()
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    # --- Daily Life Tools ---
+
+    def tool_age_calc(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        birthdate = str(action.get("birthdate", action.get("date", "")))
+        res = age_calc(birthdate)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_bmi_calc(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        weight = float(action.get("weight", 0))
+        height = float(action.get("height", 0))
+        unit = str(action.get("unit", "metric"))
+        res = bmi_calc(weight, height, unit)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_tip_calc(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        bill = float(action.get("bill", 0))
+        tip_pct = float(action.get("tip", action.get("percent", 15)))
+        split = int(action.get("split", 1))
+        res = tip_calc(bill, tip_pct, split)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_loan_calc(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        principal = float(action.get("principal", action.get("amount", 0)))
+        rate = float(action.get("rate", 0))
+        years = int(action.get("years", action.get("term", 30)))
+        res = loan_calc(principal, rate, years)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_water_tracker(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "status"))
+        amount = int(action.get("amount", 250))
+        res = water_tracker(operation, amount)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_sleep_tracker(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "status"))
+        hours = float(action.get("hours", 0))
+        quality = str(action.get("quality", ""))
+        res = sleep_tracker(operation, hours, quality)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_flashcards(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "quiz"))
+        deck = str(action.get("deck", "default"))
+        front = str(action.get("front", action.get("question", "")))
+        back = str(action.get("back", action.get("answer", "")))
+        res = flashcards(operation, deck, front, back)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_contacts(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "list"))
+        name = str(action.get("name", ""))
+        phone = str(action.get("phone", ""))
+        email = str(action.get("email", ""))
+        note = str(action.get("note", ""))
+        res = contacts(operation, name, phone, email, note)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_daily_affirmation(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        res = daily_affirmation()
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    # --- Automation Tools ---
+
+    def tool_youtube_download(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        url = str(action.get("url", action.get("query", "")))
+        output_dir = str(action.get("output_dir", action.get("output", "")))
+        fmt = str(action.get("format", "mp4"))
+        quality = str(action.get("quality", "best"))
+        res = youtube_download(url, output_dir, fmt, quality)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_pdf_summarize(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        file_path = str(action.get("file", action.get("path", "")))
+        max_pages = int(action.get("max_pages", 20))
+        mode = str(action.get("mode", "summary"))
+        resolved = str(self.pm.resolve_target(file_path))
+        res = pdf_summarize(resolved, max_pages, mode)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_image_resize(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        file_path = str(action.get("file", action.get("path", "")))
+        width = int(action.get("width", 0))
+        height = int(action.get("height", 0))
+        scale = float(action.get("scale", 0.0))
+        output = str(action.get("output", ""))
+        quality = int(action.get("quality", 85))
+        resolved = str(self.pm.resolve_target(file_path))
+        res = image_resize(resolved, width, height, scale, output, quality)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_auto_backup(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        destination = str(action.get("destination", ""))
+        mode = str(action.get("mode", "snapshot"))
+        max_backups = int(action.get("max_backups", 10))
+        resolved = str(self.pm.resolve_target(path))
+        res = auto_backup(resolved, destination, mode, max_backups)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_daily_digest(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        scope = str(action.get("scope", "today"))
+        res = daily_digest(path, scope)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_project_stats(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        resolved = str(self.pm.resolve_target(path))
+        res = project_stats(resolved)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_dependency_audit(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        fix = bool(action.get("fix", False))
+        resolved = str(self.pm.resolve_target(path))
+        res = dependency_audit(resolved, fix)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_docker_helper(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", ""))
+        target = str(action.get("target", ""))
+        options = str(action.get("options", ""))
+        res = docker_helper(operation, target, options)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_auto_commit(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        path = str(action.get("path", str(self.pm.effective_root)))
+        message = str(action.get("message", ""))
+        mode = str(action.get("mode", "smart"))
+        res = auto_commit(path, message, mode)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+
+    def tool_cron_scheduler(self, action: dict[str, Any], _ay: bool) -> tuple[bool, str]:
+        operation = str(action.get("operation", "list"))
+        name = str(action.get("name", ""))
+        schedule = str(action.get("schedule", ""))
+        command = str(action.get("command", ""))
+        path = str(action.get("path", ""))
+        res = cron_scheduler(operation, name, schedule, command, path)
+        return False, self.result(res["success"], res.get("result", res.get("error", "")))
+

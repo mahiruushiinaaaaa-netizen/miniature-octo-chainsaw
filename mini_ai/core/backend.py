@@ -191,6 +191,90 @@ def server_ready(base_url: str) -> bool:
     return False
 
 
+# ── Ollama Backend ────────────────────────────────────────────────────────────
+
+_OLLAMA_URL = "http://127.0.0.1:11434"
+
+
+def ollama_available() -> bool:
+    """Check if Ollama is running."""
+    return http_get_json(f"{_OLLAMA_URL}/api/tags", timeout=2) is not None
+
+
+def ollama_generate(
+    model: str,
+    prompt: str,
+    system_text: str | None = None,
+    max_tokens: int = 256,
+    temperature: float = 0.0,
+    grammar: str | None = None,
+    on_token: Callable | None = None,
+) -> str | None:
+    """Generate text using Ollama's API.
+    
+    Supports both streaming (with on_token callback) and non-streaming modes.
+    Grammar is passed as a GBNF string if provided.
+    """
+    # Aggressive speed tuning: keep model loaded, larger batch
+    is_small = "0.5b" in model.lower() or "0.8b" in model.lower()
+    # Use FIXED num_ctx — varying it causes Ollama to reload the model (very slow on CPU)
+    # Keep size minimal-but-consistent so the KV cache stays warm
+    ctx_size = 1024 if is_small else 2048
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": on_token is not None,
+        "keep_alive": "30m",  # Keep model in RAM between calls — huge speedup
+        "options": {
+            "num_predict": max_tokens,
+            "temperature": temperature,
+            "num_ctx": ctx_size,
+            "num_batch": 1024,  # Larger batch for faster prompt processing
+            "num_thread": 0,  # Let Ollama auto-detect optimal threads
+        },
+    }
+    if system_text:
+        payload["system"] = system_text
+    
+    url = f"{_OLLAMA_URL}/api/generate"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            if on_token:
+                # Streaming mode — Ollama returns newline-delimited JSON
+                content_parts = []
+                for line in resp:
+                    line = line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                        token = chunk.get("response", "")
+                        if token:
+                            content_parts.append(token)
+                            on_token(token)
+                        if chunk.get("done", False):
+                            break
+                    except json.JSONDecodeError:
+                        continue
+                return "".join(content_parts) if content_parts else None
+            else:
+                # Non-streaming mode
+                raw = resp.read().decode("utf-8", errors="replace")
+                result = json.loads(raw)
+                content = result.get("response", "").strip()
+                return content if content else None
+    except Exception as e:
+        logger.debug(f"Ollama generation failed: {e}")
+        return None
+
+
 def start_server(config: Config):
     if not config.server_bin:
         err("llama-server not found")
@@ -655,12 +739,108 @@ def get_embeddings(config: Config, text: str, timeout: int = 60) -> list[float]:
         return []
 
 
+def get_embeddings_batch(config: Config, texts: list[str], timeout: int = 60) -> list[list[float]]:
+    """
+    Get embeddings for multiple texts in a single batched API call.
+
+    Tries the /embeddings (plural) endpoint first for true batch support.
+    If that fails, falls back to individual /embedding calls grouped into
+    batches of 16 (ceil(N/16) calls instead of N).
+
+    Returns a list of embedding vectors (one per input text).
+    Returns an empty vector [] for any text that fails to embed.
+    """
+    if not texts:
+        return []
+
+    # Try batch endpoint first (/embeddings plural)
+    batch_result = _try_batch_endpoint(config, texts, timeout)
+    if batch_result is not None:
+        return batch_result
+
+    # Fallback: individual calls grouped into batches of 16
+    _BATCH_GROUP_SIZE = 16
+    logger.debug(
+        f"Batch endpoint unavailable, using grouped individual calls "
+        f"({len(texts)} texts in groups of {_BATCH_GROUP_SIZE})"
+    )
+    results: list[list[float]] = []
+    for i in range(0, len(texts), _BATCH_GROUP_SIZE):
+        group = texts[i:i + _BATCH_GROUP_SIZE]
+        for text in group:
+            embedding = get_embeddings(config, text, timeout=timeout)
+            results.append(embedding)
+
+    return results
+
+
+def _try_batch_endpoint(config: Config, texts: list[str], timeout: int) -> list[list[float]] | None:
+    """
+    Try the /embeddings (plural) batch endpoint.
+    Returns None if not supported, allowing fallback to individual calls.
+    """
+    url = config.base_url + "/embeddings"
+    payload = {"content": texts}
+
+    try:
+        data = http_post_json(url, payload, timeout=timeout)
+
+        # Try common response shapes
+        if "results" in data and isinstance(data["results"], list):
+            embeddings = []
+            for item in data["results"]:
+                if isinstance(item, dict) and "embedding" in item:
+                    embeddings.append([float(x) for x in item["embedding"]])
+                elif isinstance(item, list):
+                    embeddings.append([float(x) for x in item])
+                else:
+                    embeddings.append([])
+            if len(embeddings) == len(texts):
+                return embeddings
+
+        # Alternative format
+        if "embeddings" in data and isinstance(data["embeddings"], list):
+            embeddings = []
+            for item in data["embeddings"]:
+                if isinstance(item, list):
+                    embeddings.append([float(x) for x in item])
+                else:
+                    embeddings.append([])
+            if len(embeddings) == len(texts):
+                return embeddings
+
+        return None
+
+    except urllib.error.HTTPError as he:
+        logger.debug(f"Batch embeddings endpoint not supported ({he.code})", operation="embeddings_batch")
+        return None
+    except Exception as e:
+        logger.debug(f"Batch embeddings failed: {type(e).__name__}", operation="embeddings_batch")
+        return None
+
+
 # ── Main generate entrypoint ──────────────────────────────────────────────────
+
+def generate_fast(config: Config, prompt: str, system_text: str | None = None,
+                  max_tokens: int = 80) -> str | None:
+    """Generate using the fast 0.5B model (CONVO/QUERY route).
+    
+    Always uses ollama_fast_model. No fallback — if it fails, caller handles it.
+    """
+    fast_model = getattr(config, 'ollama_fast_model', 'qwen2.5:0.5b')
+    return ollama_generate(
+        model=fast_model,
+        prompt=prompt,
+        system_text=system_text,
+        max_tokens=max_tokens,
+        temperature=0.7,
+    )
+
 
 def generate(config: Config, prompt: str, max_tokens: int = 128,
              system_text=None, use_cache: bool = True, on_token=None,
              grammar: str | None = None, schema_registry: dict | None = None):
-    """Generate text from llama-server with caching, streaming, and adaptive grammar.
+    """Generate text from llama-server or Ollama with caching, streaming, and adaptive grammar.
     
     Args:
         config: Backend configuration.
@@ -676,13 +856,15 @@ def generate(config: Config, prompt: str, max_tokens: int = 128,
     """
     # Resolve effective grammar for cache key
     effective_grammar = _select_grammar(config, grammar)
-    cache_key = (str(config.model), system_text or "", prompt, int(max_tokens),
+    cache_key = (str(config.model) or getattr(config, 'ollama_model', ''), 
+                 system_text or "", prompt, int(max_tokens),
                  float(config.temp), effective_grammar or "")
     
     logger.debug("Generation request", operation="generate", context={
-        "model": str(config.model),
+        "model": str(config.model) if config.model else getattr(config, 'ollama_model', 'unknown'),
         "max_tokens": max_tokens,
         "use_cache": use_cache,
+        "use_ollama": getattr(config, 'use_ollama', False),
         "grammar_adaptive": config.grammar_adaptive,
         "streaming_parse": config.streaming_parse,
     })
@@ -701,7 +883,29 @@ def generate(config: Config, prompt: str, max_tokens: int = 128,
     started = time.perf_counter()
     
     try:
-        if on_token or (config.streaming_parse and schema_registry):
+        # Ensure servers are running (auto-start if idle-stopped)
+        from .server_manager import get_server_manager
+        mgr = get_server_manager()
+        mgr.touch()  # Record activity
+        
+        # Route to Ollama if enabled
+        if getattr(config, 'use_ollama', False):
+            if not mgr.ensure_ollama():
+                raise RuntimeError("Ollama is not available. Start Ollama and retry.")
+            model_name = getattr(config, 'ollama_model', 'qwen2.5:3b')
+            ollama_prompt = prompt
+            if system_text and prompt.startswith(system_text):
+                ollama_prompt = prompt[len(system_text):].lstrip("\n")
+            content = ollama_generate(
+                model=model_name,
+                prompt=ollama_prompt,
+                system_text=system_text,
+                max_tokens=max_tokens,
+                temperature=config.temp,
+                grammar=None,
+                on_token=on_token,
+            )
+        elif on_token or (config.streaming_parse and schema_registry):
             content = completion_streaming(
                 config, prompt, max_tokens, system_text,
                 on_token=on_token, grammar=grammar,

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, List, Dict
 
 from .agent import agent_mode
+from .task_result import TaskResult
 from ..core.config import Config
 from ..core.memory import PersistentMemory, SessionMemory
 from ..core.workspace import detect_environment
@@ -26,16 +27,53 @@ def _route_task(task: Task) -> str:
         return "terminal"
     if any(t in tags for t in ["file", "dir", "folder", "list", "read", "create", "filesystem"]):
         return "filesystem"
+    if any(t in tags for t in ["data", "json", "csv", "parse", "transform", "analyze"]):
+        return "data"
+    if any(t in tags for t in ["api", "http", "request", "endpoint", "rest", "fetch"]):
+        return "api"
+    if any(t in tags for t in ["system", "admin", "process", "service", "deploy", "docker"]):
+        return "admin"
     
     # Heuristics on description
-    if any(x in desc for x in ["implement", "write code", "edit file", "fix bug"]):
+    if any(x in desc for x in ["implement", "write code", "edit file", "fix bug", "refactor"]):
         return "coder"
-    if any(x in desc for x in ["run command", "install", "setup", "start", "migrate"]):
+    if any(x in desc for x in ["run command", "install", "setup", "start", "migrate", "build", "deploy"]):
         return "terminal"
     if any(x in desc for x in ["create folder", "list directory", "read contents"]):
         return "filesystem"
+    if any(x in desc for x in ["parse json", "analyze csv", "transform data", "query data"]):
+        return "data"
+    if any(x in desc for x in ["call api", "http request", "fetch url", "rest api"]):
+        return "api"
+    if any(x in desc for x in ["system info", "kill process", "manage service", "check port"]):
+        return "admin"
         
     return "agent"
+
+
+# ---------------------------------------------------------------------------
+# Role → ToolRouter task type mapping
+# Requirements: 11.1, 11.2, 11.7
+# ---------------------------------------------------------------------------
+
+_ROLE_TO_TASK_TYPE: dict[str, str] = {
+    "coder": "code_editing",
+    "terminal": "default",
+    "filesystem": "exploration",
+    "agent": "default",
+    "data": "data_processing",
+    "api": "web_api",
+    "admin": "system_admin",
+}
+
+
+def _role_to_task_type(role: str) -> str:
+    """Map an orchestrator role to a ToolRouter task type.
+
+    Returns one of: "code_editing", "exploration", "default".
+    Falls back to "default" for unrecognized roles (Requirement 11.7).
+    """
+    return _ROLE_TO_TASK_TYPE.get(role, "default")
 
 
 def orchestrated_agent_mode(
@@ -111,7 +149,7 @@ def orchestrated_agent_mode(
                 if getattr(config, 'tri_model', False) and getattr(config, 'analyzer_config', None) and getattr(config, 'coder_config', None):
                     # --- Tri-Model Collaborative Pipeline ---
                     panel("ANALYZER", f"Building Context Brief for: {task.id}")
-                    analysis_context = agent_mode(
+                    analysis_raw = agent_mode(
                         config.analyzer_config,
                         f"Analyze requirements for Task {task.id}: {task.title}. {task.description}\nProject Context:\n{step_context}" + (f"\nPREVIOUS FAILURE: Task failed before. Review and adjust strategy." if retry_count > 0 else ""),
                         assume_yes=assume_yes,
@@ -121,9 +159,10 @@ def orchestrated_agent_mode(
                         intent="QUERY",
                         initial_target=initial_target
                     )
+                    analysis_context = TaskResult.from_json(analysis_raw).output
                     
                     panel("CODER", f"Executing implementation for: {task.id}")
-                    result = agent_mode(
+                    coder_raw = agent_mode(
                         config.coder_config,
                         f"Execute Task {task.id}: {task.title}. {task.description}\n\nContext Brief from Analyzer:\n{analysis_context}",
                         assume_yes=assume_yes,
@@ -135,6 +174,8 @@ def orchestrated_agent_mode(
                         intent="EDIT",
                         initial_target=initial_target
                     )
+                    coder_result = TaskResult.from_json(coder_raw)
+                    result = coder_result.output
                     
                     panel("ANALYZER REVIEW", f"Reviewing task {task.id} execution...")
                     review_out = agent_mode(
@@ -168,16 +209,10 @@ def orchestrated_agent_mode(
                         intent="TASK",
                         initial_target=initial_target
                     )
-                    # A task is successful ONLY if it's not explicitly failed,
-                    # AND it either reached a final answer or executed a tool successfully.
-                    # This prevents the orchestrator from thinking 'hallucinated' text is success.
-                    has_error = "failed" in result.lower() or "error" in result.lower()
-                    
-                    # We can also check if the agent actually finished its loop
-                    success = not has_error and ("final answer" in result.lower() or "completed" in result.lower() or retry_count > 0)
-                    
-                    # Better: check if agent_mode actually returned a result from a tool
-                    # (In orchestrated mode, we should ideally pass back a status flag)
+                    # Parse structured TaskResult JSON — no string pattern matching
+                    task_result = TaskResult.from_json(result)
+                    success = task_result.success
+                    result = task_result.output
                 
                 if success:
                     break

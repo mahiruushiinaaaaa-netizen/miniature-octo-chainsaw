@@ -41,6 +41,16 @@ from .metrics import (
     get_metrics_collector,
     record_metric,
 )
+from .micro_prompts import (
+    MicroPromptTemplate,
+    MicroPromptRegistry,
+    PromptAssembler,
+    StepMemory,
+    select_grammar_for_intent,
+)
+from .grammars import MINIMAL_JSON_GRAMMAR
+from .prompt_rewriter import PromptRewriter
+from .server_manager import ServerManager, get_server_manager
 
 __all__ = [
     # Configuration
@@ -98,4 +108,17 @@ __all__ = [
     "OperationTimer",
     "get_metrics_collector",
     "record_metric",
+    # Micro Prompts
+    "MicroPromptTemplate",
+    "MicroPromptRegistry",
+    "PromptAssembler",
+    "StepMemory",
+    "select_grammar_for_intent",
+    # Grammars
+    "MINIMAL_JSON_GRAMMAR",
+    # Prompt Rewriter
+    "PromptRewriter",
+    # Server Manager
+    "ServerManager",
+    "get_server_manager",
 ]

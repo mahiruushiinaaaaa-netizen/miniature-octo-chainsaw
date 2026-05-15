@@ -479,18 +479,9 @@ class CopixTUI:
     
     def render(self):
         """Render the complete UI."""
-        self.console.clear()
-        
-        # Header
-        self.console.print(self._render_header())
-        
-        # Messages
-        for i, msg in enumerate(self.messages):
-            self.console.print(self._render_message(msg, i))
-        
-        # Generation spinner (if active)
-        if self.current_generation:
-            pass  # Already being rendered by Live
+        # Don't clear screen - it can interfere with terminal state after Rich Live panels
+        # Just print a separator and the footer for the next prompt
+        self.console.print()  # blank line separator
         
         # Footer
         self.console.print(self._render_footer())

@@ -1,0 +1,210 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test
+  - **Property 1: Bug Condition** - Architecture Performance Degradation
+  - **IMPORTANT**: Write this property-based test BEFORE implementing the fix
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bugs exist
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior - it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate the architectural bugs exist
+  - **Scoped PBT Approach**: Scope properties to concrete failing cases for each bug condition:
+    - (a) Duplicated loop detection: Simulate 3 identical tool calls → verify BOTH LoopDetector AND inline detection (action_history, action_name_list, strict_repeat_count, consecutive_name_repeats) fire independently with different recovery actions
+    - (b) N+1 embedding calls: Call `retrieve_relevant_snippets` with a multi-chunk file → count embedding API calls → verify N+1 pattern (>2 calls)
+    - (c) No-fallback RAG: Set embeddings unavailable → call `retrieve_relevant_snippets` → verify empty list returned (zero context enrichment)
+    - (d) Expensive retry after success: Simulate previous step succeeding then current step returning empty → verify system performs expensive retries (3 full LLM calls) instead of short-circuiting
+    - (e) Orchestrator false positive: Pass result "the test that previously failed now passes" → verify incorrectly classified as failure via string matching
+    - (f) Narration-embedded JSON: Pass `'Let me run this: {"action": "run_cmd", "command": "echo hi"}'` to parse_action → verify JSON is dropped due to "let me" heuristic firing before extraction
+  - Bug Condition from design: `isBugCondition(input)` where `agent_file_lines > 300 AND has_inline_loop_detection AND has_duplicated_parsing_logic` OR `rag_embedded_in_executor AND (embedding_calls_per_retrieval > 2 OR (embeddings_unavailable AND fallback_returns_empty))` OR `previous_step_succeeded AND current_output_empty AND performs_expensive_retries` OR `success_determined_by_string_matching`
+  - Run test on UNFIXED code - expect FAILURE (this confirms the bugs exist)
+  - Document counterexamples found:
+    - Inline loop detection fires at different thresholds than LoopDetector
+    - Embedding call count scales linearly with chunk count (N+1)
+    - Empty retrieval results when embeddings unavailable
+    - 3 expensive LLM calls even when model was responsive on previous step
+    - String "failed" in success output causes false failure classification
+  - Mark task complete when test is written, run, and failure is documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 3.5_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Non-Decomposed Paths Unchanged
+  - **IMPORTANT**: Follow observation-first methodology
+  - **IMPORTANT**: Write these tests BEFORE implementing the fix
+  - Observe behavior on UNFIXED code for non-buggy inputs (cases where isBugCondition returns false):
+    - Observe: MicroPromptRegistry assembles prompts within ~500 token budget with Goal/Tools/Context/Example/Output JSON structure
+    - Observe: Tool execution returns JSON observation format `{"success": bool, "output": str}` to agent loop
+    - Observe: ToolRouter caps at 8 tools per turn and always includes "answer" in available set
+    - Observe: SelfHealingParser handles single quotes, trailing commas, backslash escaping, Levenshtein ≤ 2 tool name correction
+    - Observe: Config flags set to False fall back to original monolithic behavior without errors
+    - Observe: ToolDisabler protects required categories (filesystem, execution, output) by re-enabling LRU tool
+    - Observe: COMPLEX intent uses full monolithic prompt system with complete context
+    - Observe: System prompt templates remain at or below 60 tokens (len(text) // 4)
+    - Observe: GBNF grammar enforces same JSON structure `{"action": tool_name, ...params}`
+    - Observe: First-attempt valid JSON tool calls execute immediately without additional overhead
+  - Write property-based tests capturing observed behavior patterns:
+    - Property: For all random goals and intents (TASK/QUERY/EDIT/EXPLORE), assembled prompts stay within ~500 token budget
+    - Property: For all valid tool actions, JSON observation format is `{"success": bool, "output": str}`
+    - Property: For all task types, ToolRouter returns ≤8 tools and always includes "answer"
+    - Property: For all malformed JSON inputs (single quotes, trailing commas, etc.), SelfHealingParser produces same repair output
+    - Property: For all config flag combinations set to False, system falls back without errors
+    - Property: For all valid JSON tool calls on first attempt, no additional parsing overhead beyond current
+  - Verify tests PASS on UNFIXED code (confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11_
+
+- [x] 3. Fix for architecture performance degradation
+
+  - [x] 3.1 Extract retry module (`mini_ai/core/retry.py`)
+    - Move `_generate_with_retry` and `RetryState` from agent.py to dedicated `mini_ai/core/retry.py`
+    - Add `previous_step_succeeded: bool` parameter to enable short-circuit
+    - Implement short-circuit: if `previous_step_succeeded=True` AND output is empty → return `(None, None, retry_state)` immediately (no retries)
+    - Implement zero-cost recovery: re-send same prompt with `temp + 0.1` or `seed + 1` as first retry attempt (no grammar recompilation, no prompt modification)
+    - Keep existing cascade (grammar-removal → nudge) as fallback after zero-cost fails
+    - Track both zero-cost empty and original empty toward consecutive_empties threshold of 2
+    - Module must be importable and callable without instantiating the full agent
+    - _Bug_Condition: isBugCondition(input) where previous_step_succeeded=TRUE AND current_output_empty=TRUE AND performs_expensive_retries=TRUE_
+    - _Expected_Behavior: Short-circuit when model is responsive; zero-cost recovery before expensive retries_
+    - _Preservation: Connection pool retry policy (exponential backoff on 503, max 3 retries) unchanged; config flag fallback to original behavior_
+    - _Requirements: 1.1, 2.1, 2.7, 3.1, 3.2, 3.4, 3.6_
+
+  - [x] 3.2 Create unified tool-calling pipeline (`mini_ai/core/tool_pipeline.py`)
+    - Single entry point: `process_model_output(raw_output, tool_schemas) → ToolAction | None`
+    - Stage 1: JSON extraction via brace-matching scan for dict with "action" key — runs BEFORE narration heuristics
+    - Stage 2: If extraction fails, attempt `SelfHealingParser.parse()` returning repaired dict or None
+    - Stage 3: If dict returned, validate "action" field against registered tool schema names
+    - Stage 4: If all stages fail, return None (no valid action)
+    - Move `parse_action`, `_try_extract_json`, `_is_refusal` from agent.py into this module
+    - Narration heuristics ("i will", "first,", "step 1") only checked AFTER JSON extraction fails
+    - Each stage returns explicit success-or-failure result
+    - Module must be importable and callable without instantiating the full agent
+    - _Bug_Condition: isBugCondition(input) where has_duplicated_parsing_logic=TRUE; narration-embedded JSON dropped by heuristic_
+    - _Expected_Behavior: JSON extraction prioritized over narration detection; unified pipeline with clear stages_
+    - _Preservation: SelfHealingParser handles single quotes, trailing commas, backslash escaping, Levenshtein ≤ 2 (Req 3.5); first-attempt valid JSON executes immediately (Req 3.11)_
+    - _Requirements: 1.1, 1.3, 1.4, 2.1, 2.8, 2.9, 3.5, 3.10, 3.11_
+
+  - [x] 3.3 Remove inline loop detection from agent.py
+    - Remove `action_history: list[str]` and `action_name_list: list[str]` tracking
+    - Remove `strict_repeat_count = action_history.count(action_sig)` check
+    - Remove `consecutive_name_repeats` counting loop
+    - Keep only `loop_detector.record()` and `loop_detector.is_looping()` from LoopDetector
+    - Preserve recovery behavior (tool disabling, web search fallback) but trigger only from LoopDetector
+    - _Bug_Condition: isBugCondition(input) where has_inline_loop_detection=TRUE causing duplicated detection with inconsistent thresholds_
+    - _Expected_Behavior: Single source of truth for loop detection via LoopDetector class_
+    - _Preservation: ToolDisabler category protection unchanged (Req 3.7); LoopDetector sliding window (WINDOW_SIZE=10, LOOP_THRESHOLD=3) unchanged_
+    - _Requirements: 1.1, 1.2, 2.1, 2.3, 3.7_
+
+  - [x] 3.4 Lean agent coordinator (refactored `mini_ai/agents/agent.py` ≤300 lines)
+    - Target: ≤300 lines excluding blanks and comments
+    - Import and delegate to: `retry.py`, `tool_pipeline.py`, `micro_prompts.py`, `streaming.py`, `self_healing.py`, `tool_reliability.py`
+    - Retain in coordinator: step loop, context assembly, executor dispatch, observation recording, UI calls
+    - Each delegated module must be importable and callable without instantiating the full agent
+    - Verify all existing imports and functionality preserved through delegation
+    - _Bug_Condition: isBugCondition(input) where agent_file_lines > 300 AND has_inline_loop_detection AND has_duplicated_parsing_logic_
+    - _Expected_Behavior: Lean coordinator ≤300 lines delegating to focused modules_
+    - _Preservation: Config flags=False falls back to monolithic behavior (Req 3.6); COMPLEX intent uses full monolithic prompt (Req 3.8); system prompt ≤60 tokens (Req 3.9)_
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 2.1, 2.3, 2.8, 2.9, 3.6, 3.8, 3.9_
+
+  - [x] 3.5 Create context injection layer (`mini_ai/core/context_injector.py`)
+    - Interface: `enrich(path: str, content: str, query: str) → list[ScoredSnippet]`
+    - `ScoredSnippet` dataclass: `{source_path: str, score: float, content: str, offset_start: int, offset_end: int}`
+    - Delegates to RAGManager for embedding-based retrieval
+    - Falls back to TF-IDF when embeddings unavailable
+    - Returns first 3000 chars as raw block if both methods fail (with warning log)
+    - Each snippet includes source file path, relevance score (0.0-1.0), and character offset range
+    - _Bug_Condition: isBugCondition(input) where rag_embedded_in_executor=TRUE_
+    - _Expected_Behavior: Decoupled context injection with clean interface; executor calls enrich() instead of embedding RAG logic_
+    - _Preservation: Tool execution observation format unchanged (Req 3.2)_
+    - _Requirements: 2.1, 2.2, 2.4, 2.5, 3.2_
+
+  - [x] 3.6 Batch embeddings in RAGManager
+    - Replace per-chunk `get_embeddings(chunk)` loop with single batched call
+    - New method: `get_embeddings_batch(texts: list[str]) → list[list[float]]`
+    - At most 2 API round-trips: 1 for query embedding, 1 batched for all chunk embeddings
+    - If backend doesn't support batch, chunk into groups of 16 and make ceil(N/16) calls (still far fewer than N)
+    - Completing retrieval within 5 seconds for files up to 100KB on target hardware
+    - _Bug_Condition: isBugCondition(input) where embedding_calls_per_retrieval > 2_
+    - _Expected_Behavior: At most 2 API round-trips for any retrieval operation_
+    - _Preservation: Cosine similarity scoring unchanged; chunk_size=1500, chunk_overlap=200 unchanged_
+    - _Requirements: 2.2, 2.4_
+
+  - [x] 3.7 TF-IDF fallback in context_injector
+    - Pure Python TF-IDF using `collections.Counter` and `math.log` (no external deps)
+    - Tokenize query and chunks on whitespace + punctuation
+    - Score chunks by sum of TF-IDF weights for query terms
+    - Return top 1-5 snippets (≤1500 chars each), completing within 500ms for 100KB files
+    - Each snippet includes source path, score (0.0-1.0 normalized), and character offset range
+    - _Bug_Condition: isBugCondition(input) where embeddings_unavailable=TRUE AND fallback_returns_empty=TRUE_
+    - _Expected_Behavior: Meaningful context snippets without embedding models; RAG always contributes useful context_
+    - _Preservation: No external dependencies added; existing RAGManager interface unchanged_
+    - _Requirements: 2.3, 2.5_
+
+  - [x] 3.8 Remove RAG logic from executor
+    - Replace `self.rag.decide_strategy()` and `self.rag.retrieve_relevant_snippets()` calls in `tool_read_files` with `self._context_injector.enrich(path, content, query)`
+    - Executor no longer imports or instantiates RAGManager directly for strategy decisions
+    - RAGManager remains as the embedding engine, called by context_injector
+    - _Bug_Condition: isBugCondition(input) where rag_embedded_in_executor=TRUE_
+    - _Expected_Behavior: No retrieval logic in executor module; clean delegation to context_injector_
+    - _Preservation: Tool execution observation format unchanged (Req 3.2); direct tool execution unaffected_
+    - _Requirements: 2.1, 2.2_
+
+  - [x] 3.9 Structured TaskResult in orchestrator
+    - Define `TaskResult` dataclass: `{success: bool, output: str, tool_name: str | None, exit_code: int | None}`
+    - `agent_mode()` returns `TaskResult` (or serialized JSON with "success" field) instead of raw text
+    - Orchestrator reads `result.success` boolean directly — no string pattern matching
+    - If JSON parse fails or "success" field missing → treat as failure, include raw output in observation
+    - _Bug_Condition: isBugCondition(input) where success_determined_by_string_matching=TRUE_
+    - _Expected_Behavior: Structured result objects with explicit success/failure fields_
+    - _Preservation: Tool execution observation format `{"success": bool, "output": str}` unchanged (Req 3.2)_
+    - _Requirements: 3.4, 3.5_
+
+  - [x] 3.10 Remove heuristic string matching from orchestrator
+    - Remove: `has_error = "failed" in result.lower() or "error" in result.lower()`
+    - Remove: `success = not has_error and ("final answer" in result.lower() or "completed" in result.lower() or retry_count > 0)`
+    - Replace with: parse result as JSON/TaskResult, read "success" field
+    - If JSON parse fails or "success" field missing → treat as failure, include raw output
+    - _Bug_Condition: isBugCondition(input) where success_determined_by_string_matching=TRUE_
+    - _Expected_Behavior: Success determined exclusively by structured "success" boolean field_
+    - _Preservation: Orchestrator retry policy (max_retries=2) unchanged; task graph execution order unchanged_
+    - _Requirements: 3.4, 3.5_
+
+  - [x] 3.11 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Architecture Performance Degradation Fixed
+    - **IMPORTANT**: Re-run the SAME test from task 1 - do NOT write a new test
+    - The test from task 1 encodes the expected behavior for all bug conditions
+    - When this test passes, it confirms:
+      - Only LoopDetector used for loop detection (no inline duplicates)
+      - Embedding calls ≤ 2 per retrieval (batched)
+      - TF-IDF fallback returns snippets when embeddings unavailable
+      - Short-circuit fires when previous step succeeded
+      - Orchestrator uses structured result field not string matching
+      - JSON extraction prioritized over narration heuristics
+    - Run bug condition exploration test from step 1
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bugs are fixed)
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 3.5_
+
+  - [x] 3.12 Verify preservation tests still pass
+    - **Property 2: Preservation** - Non-Decomposed Paths Unchanged
+    - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
+    - Run preservation property tests from step 2
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions)
+    - Confirm all preservation properties still hold:
+      - Prompt budget ≤500 tokens
+      - Observation format unchanged
+      - ToolRouter ≤8 tools + "answer"
+      - SelfHealingParser same repairs
+      - Config fallbacks work
+      - ToolDisabler category protection
+      - COMPLEX intent full prompts
+      - System prompt ≤60 tokens
+      - GBNF grammar unchanged
+      - First-attempt fast path preserved
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11_
+
+- [x] 4. Checkpoint - Ensure all tests pass
+  - Run full test suite to verify all property-based tests pass
+  - Verify bug condition exploration test passes (confirms fix works)
+  - Verify preservation tests pass (confirms no regressions)
+  - Verify agent.py is ≤300 lines (excluding blanks/comments)
+  - Verify no inline loop detection code remains in agent.py
+  - Verify no RAG logic remains in executor.py
+  - Verify no string pattern matching remains in orchestrator.py
+  - Ensure all tests pass, ask the user if questions arise

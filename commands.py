@@ -13,6 +13,7 @@ from typing import Optional
 
 from ..agents.agent import agent_mode, request_stop, _try_quick_math
 from ..agents.orchestrator import orchestrated_agent_mode
+from ..agents.task_result import TaskResult
 from .backend import generate
 from .config import Config
 from ..ui import ok, err, warn, ai, panel, set_compact, set_raw, STATE
@@ -1492,6 +1493,8 @@ class CommandRouter:
                 intent=intent, # Pass the dynamic intent tier
             )
         
+        # Extract human-readable output from structured TaskResult JSON
+        result = TaskResult.from_json(result).output
         self.memory.add_event(f"Task: {goal}\nResult: {result}")
         self.chat_history.append("ASSISTANT", result)
         

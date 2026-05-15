@@ -109,6 +109,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--agent-tokens", type=int, default=1024, help="Max agent tokens")
     p.add_argument("--low-end", action="store_true", help="Force low-end mode optimizations")
     p.add_argument("--copix", action="store_true", help="Use CopixTUI (Copilot/Codex-style interface)")
+    p.add_argument("--ollama", action="store_true", help="Use Ollama backend (no llama-server needed)")
+    p.add_argument("--ollama-model", type=str, default="", help="Ollama model for agent tasks (selected at startup if empty)")
+    p.add_argument("--ollama-fast", type=str, default="", help="Ollama fast model for intent/chat (selected at startup if empty)")
+    p.add_argument("--pick-model", action="store_true", help="Force model re-selection (ignore saved config)")
+    p.add_argument("-c", "--command", type=str, default=None, help="Execute a command non-interactively and exit")
     
     # Logging
     p.add_argument("--verbose", action="store_true", help="Verbose output")
@@ -266,6 +271,12 @@ def build_config_v2(args: argparse.Namespace) -> Optional[AppConfig]:
     config.agent_model.role = "agent"
     config.llama_server_bin = server_bin
     config.llama_cli_bin = cli_bin or server_bin
+    config.gpu_layers = getattr(args, 'gpu_layers', 0)
+    
+    # Ollama is the ONLY backend — always enabled
+    config.use_ollama = True
+    config.ollama_model = getattr(args, 'ollama_model', '') or getattr(config, 'ollama_model', '')
+    config.ollama_fast_model = getattr(args, 'ollama_fast', '') or getattr(config, 'ollama_fast_model', '')
 
     if args.workspace:
         config.workspace = Path(args.workspace).expanduser().resolve()
@@ -380,24 +391,32 @@ def repl(config: AppConfig, use_copix: bool = False) -> None:
     # Enable CopixTUI if requested
     legacy_config.use_copix = use_copix
     
+    # Propagate Ollama settings to legacy config
+    if getattr(config, 'use_ollama', False):
+        legacy_config.use_ollama = True
+        legacy_config.ollama_model = getattr(config, 'ollama_model', 'sorc/qwen3.5-claude-4.6-opus-q4:2b')
+        legacy_config.ollama_fast_model = getattr(config, 'ollama_fast_model', 'qwen2.5:0.5b')
+    
     router = CommandRouter(legacy_config)
 
-    # Setup prompt_toolkit
+    # Setup prompt_toolkit — only if stdin is a real terminal
     session = None
-    try:
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.history import FileHistory
-        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-        from prompt_toolkit.styles import Style
-        
-        history_path = Path.home() / ".mini_ai_history"
-        session = PromptSession(
-            history=FileHistory(str(history_path)),
-            auto_suggest=AutoSuggestFromHistory(),
-        )
-        HAS_PTK = True
-    except ImportError:
-        HAS_PTK = False
+    HAS_PTK = False
+    if sys.stdin.isatty():
+        try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.history import FileHistory
+            from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+            from prompt_toolkit.styles import Style
+            
+            history_path = Path.home() / ".mini_ai_history"
+            session = PromptSession(
+                history=FileHistory(str(history_path)),
+                auto_suggest=AutoSuggestFromHistory(),
+            )
+            HAS_PTK = True
+        except (ImportError, Exception):
+            HAS_PTK = False
 
     # Use CopixTUI for input if enabled
     use_copix_input = getattr(router, 'copix', None) is not None
@@ -408,7 +427,12 @@ def repl(config: AppConfig, use_copix: bool = False) -> None:
                 # Use CopixTUI elegant prompt
                 command = router.copix.get_input()
             elif session:
-                command = session.prompt("you › ").strip()
+                try:
+                    command = session.prompt("you › ").strip()
+                except Exception:
+                    # Fall back to plain input if prompt_toolkit fails (e.g., piped stdin)
+                    session = None
+                    command = input("you › ").strip()
             else:
                 command = input("you › ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -440,6 +464,180 @@ def repl(config: AppConfig, use_copix: bool = False) -> None:
         
         if not router.handle(command):
             return
+
+
+def _warmup_ollama_models(config) -> None:
+    """Force Ollama to load models into RAM. Pull if not available."""
+    import json
+    import urllib.request
+    
+    ollama_url = "http://127.0.0.1:11434"
+    models_to_warm = [config.ollama_model, config.ollama_fast_model]
+    
+    for model in models_to_warm:
+        if not model:
+            continue
+        try:
+            payload = {
+                "model": model,
+                "prompt": "hi",
+                "stream": False,
+                "keep_alive": "30m",  # Keep loaded for 30 minutes
+                "options": {"num_predict": 1},
+            }
+            data = json.dumps(payload).encode()
+            req = urllib.request.Request(
+                f"{ollama_url}/api/generate",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode())
+                if result.get("error"):
+                    raise RuntimeError(result["error"])
+            ok(f"Loaded: {model}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Model not pulled — ask to pull it
+                print(f"  Model '{model}' not found locally.")
+                ans = input(f"  Pull '{model}' from Ollama? (y/n): ").strip().lower()
+                if ans in ("y", "yes", ""):
+                    print(f"  Pulling {model}... (this may take a few minutes)")
+                    try:
+                        pull_payload = json.dumps({"name": model, "stream": False}).encode()
+                        pull_req = urllib.request.Request(
+                            f"{ollama_url}/api/pull",
+                            data=pull_payload,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(pull_req, timeout=600) as pull_resp:
+                            pull_resp.read()
+                        ok(f"Pulled and loaded: {model}")
+                    except Exception as pe:
+                        err(f"Pull failed: {pe}")
+                else:
+                    err(f"Skipped: {model}")
+            else:
+                err(f"Failed to load {model}: {e}")
+        except Exception as e:
+            err(f"Failed to load {model}: {e}")
+
+
+def _select_ollama_models(config, force_pick: bool = False) -> tuple[str, str]:
+    """Query Ollama for available models and let user pick main + fast model.
+    
+    Saves selection to .mini_ai_models.json so it doesn't ask every time.
+    Looks for config in order:
+      1. MINI_AI_MODELS env var (path to .mini_ai_models.json)
+      2. ~/.mini_ai_models.json (user home)
+      3. <workspace>/.mini_ai_models.json (project dir)
+    """
+    import json
+    import urllib.request
+    from pathlib import Path
+    import os
+    
+    # Check saved config — search multiple locations
+    save_file = None
+    search_paths = []
+    
+    # 1. Environment variable
+    env_path = os.environ.get("MINI_AI_MODELS")
+    if env_path:
+        search_paths.append(Path(env_path))
+    
+    # 2. User home directory
+    search_paths.append(Path.home() / ".mini_ai_models.json")
+    
+    # 3. Workspace directory
+    search_paths.append(Path(config.workspace) / ".mini_ai_models.json")
+    
+    if not force_pick:
+        for candidate in search_paths:
+            if candidate.exists():
+                try:
+                    # Use utf-8-sig to tolerate BOM from PowerShell-written files
+                    saved = json.loads(candidate.read_text(encoding='utf-8-sig'))
+                    if saved.get("main") and saved.get("fast"):
+                        return saved["main"], saved["fast"]
+                except Exception:
+                    pass
+    
+    # Use the first writable location for saving
+    if env_path:
+        save_file = Path(env_path)
+    else:
+        save_file = Path.home() / ".mini_ai_models.json"
+    
+    # Query Ollama for available models
+    models = []
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request("http://127.0.0.1:11434/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+            if models:
+                break
+        except Exception:
+            pass
+        import time
+        time.sleep(1)  # Wait for Ollama to be fully ready
+    
+    if not models:
+        err("No models found in Ollama. Pull a model first: ollama pull qwen2.5:0.5b")
+        return "", ""
+    
+    print("\n┌─────────────────────────────────────┐")
+    print("│     Mini AI — Model Selection       │")
+    print("└─────────────────────────────────────┘\n")
+    
+    # Show available models
+    print("Available models:")
+    for i, m in enumerate(models, 1):
+        print(f"  {i}. {m}")
+    print()
+    
+    # Select main model
+    main_model = ""
+    while not main_model:
+        try:
+            choice = input("Select MAIN model (for coding/agent tasks) [number]: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(models):
+                main_model = models[idx]
+            else:
+                print("  Invalid choice.")
+        except (ValueError, EOFError):
+            if len(models) == 1:
+                main_model = models[0]
+            else:
+                print("  Enter a number.")
+    
+    # Select fast model
+    fast_model = ""
+    while not fast_model:
+        try:
+            choice = input("Select FAST model (for intent/chat, pick smallest) [number]: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(models):
+                fast_model = models[idx]
+            else:
+                print("  Invalid choice.")
+        except (ValueError, EOFError):
+            # Default to smallest available or same as main
+            fast_model = models[-1] if len(models) > 1 else main_model
+    
+    # Save selection
+    try:
+        save_file.write_text(json.dumps({"main": main_model, "fast": fast_model}, indent=2))
+    except Exception:
+        pass
+    
+    print()
+    return main_model, fast_model
 
 
 def main() -> int:
@@ -512,22 +710,42 @@ def main() -> int:
     _metrics_format = getattr(args, 'metrics_format', 'json')
     
     try:
-        if not server_ready(config.agent_model.base_url):
-            if not _port_is_available(config.agent_model.host, config.agent_model.port):
-                new_port = _pick_free_port(config.agent_model.host)
-                logger.warn(
-                    "Requested port is busy; switching to a free port",
-                    operation="server_start",
-                    context={"from": config.agent_model.port, "to": new_port, "host": config.agent_model.host},
-                )
-                config.agent_model.port = new_port
-            logger.info(f"Starting llama-server on {config.agent_model.base_url}")
-            legacy_config = Config.from_app_config(config, config.agent_model, role="agent")
-            server_proc = start_server(legacy_config)
-            if not server_proc:
-                logger.warn("Primary agent model failed to start. Local commands only.")
+        # ── Ollama startup with model selection ──
+        from .server_manager import get_server_manager
+        from .backend import ollama_available
+        mgr = get_server_manager(getattr(config, 'idle_timeout', 180))
+        
+        if not mgr.ensure_ollama():
+            # Double-check directly — ensure_ollama might fail to start but Ollama could already be running
+            import urllib.request as _ur
+            try:
+                _req = _ur.Request("http://127.0.0.1:11434/api/tags", method="GET")
+                with _ur.urlopen(_req, timeout=3) as _resp:
+                    if _resp.status != 200:
+                        err("Ollama is not running. Install from https://ollama.com and start it.")
+                        return 1
+            except Exception:
+                err("Ollama is not running. Install from https://ollama.com and start it.")
+                return 1
+        
+        # Query available models and let user choose if not configured
+        if args.pick_model or not config.ollama_model or not config.ollama_fast_model:
+            if args.pick_model:
+                # Clear saved config to force fresh selection
+                config.ollama_model = ""
+                config.ollama_fast_model = ""
+            config.ollama_model, config.ollama_fast_model = _select_ollama_models(config, force_pick=args.pick_model)
+            if not config.ollama_model:
+                err("No models selected. Exiting.")
+                return 1
+        
+        ok(f"Main model: {config.ollama_model}")
+        ok(f"Fast model: {config.ollama_fast_model}")
+        
+        # Warm up models (force Ollama to load them into RAM)
+        _warmup_ollama_models(config)
 
-        server_url = config.agent_model.base_url
+        server_url = "http://127.0.0.1:11434"
         if not run_health_checks(config, server_url):
             if not args.allow_run:  # In strict mode, fail on health check
                 logger.error("Health checks failed. Use --allow-run to proceed anyway.")
@@ -586,6 +804,37 @@ def main() -> int:
         elif config.ui_model:
             ok(f"UI model: {config.ui_model.model_path.name if config.ui_model.model_path else 'none'}")
         
+        # Non-interactive mode: execute a single command and exit
+        if args.command:
+            legacy_config = Config.from_app_config(config, config.agent_model, role="agent")
+            if getattr(config, 'use_ollama', False):
+                legacy_config.use_ollama = True
+                legacy_config.ollama_model = getattr(config, 'ollama_model', '')
+                legacy_config.ollama_fast_model = getattr(config, 'ollama_fast_model', 'qwen2.5:0.5b')
+            legacy_config.use_copix = False
+            
+            # For complex tasks (multi-step), use the orchestrator
+            # which decomposes into small steps and feeds them 1-by-1 to the main model
+            goal = args.command
+            lowered = goal.lower()
+            is_complex = (
+                len(goal.split()) > 10 or
+                any(kw in lowered for kw in ["create", "build", "make", "setup", "implement",
+                                             "with", "then", "also", "and", "customize"])
+            )
+            
+            if is_complex:
+                from .commands import CommandRouter
+                router = CommandRouter(legacy_config)
+                # Use orchestrator mode for complex tasks
+                router.use_orchestrator = True
+                router.run_agent(goal)
+            else:
+                from .commands import CommandRouter
+                router = CommandRouter(legacy_config)
+                router.handle(goal)
+            return 0
+
         repl(config, use_copix=use_copix)
         return 0
     except KeyboardInterrupt:

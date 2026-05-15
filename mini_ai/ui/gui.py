@@ -20,6 +20,7 @@ from typing import Any
 from .ui import RICH_AVAILABLE
 from ..core.backend import server_ready, start_server, generate
 from ..agents.agent import agent_mode
+from ..agents.task_result import TaskResult
 from ..core.cli import build_config, parse_args
 from ..core.memory import PersistentMemory
 from ..core.settings import save_settings
@@ -694,7 +695,7 @@ class MiniAIApp(tk.Tk):
 
     def _run_agent_bg(self, goal: str):
         try:
-            result = agent_mode(
+            raw_result = agent_mode(
                 self._config,
                 goal,
                 assume_yes=self._autopilot_var.get(),
@@ -705,6 +706,7 @@ class MiniAIApp(tk.Tk):
                 on_command_output=self._on_command_output_cb,
                 on_command_end=self._on_command_end_cb,
             )
+            result = TaskResult.from_json(raw_result).output
             if self._memory:
                 self._memory.add_event(f"Task: {goal}\nResult: {result[:300]}")
         except Exception as exc:

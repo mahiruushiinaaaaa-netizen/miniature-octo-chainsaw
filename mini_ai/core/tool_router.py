@@ -20,14 +20,30 @@ logger = get_logger("tool_router")
 # ---------------------------------------------------------------------------
 
 TASK_TOOL_SETS: dict[str, list[str]] = {
-    "code_editing": ["edit_blocks", "read_files", "run_cmd", "answer"],
+    "code_editing": ["edit_blocks", "read_files", "run_cmd", "write_files", "search_files", "answer"],
     "exploration": [
         "read_files", "list_dir", "workspace_scan", "search_files",
-        "web_search", "answer",
+        "web_search", "file_info", "answer",
     ],
     "default": [
         "read_files", "list_dir", "run_cmd", "write_files",
-        "edit_blocks", "answer",
+        "edit_blocks", "web_search", "answer",
+    ],
+    "data_processing": [
+        "json_query", "csv_query", "text_transform", "regex_tool",
+        "calculate", "read_files", "write_files", "answer",
+    ],
+    "system_admin": [
+        "run_cmd", "system_info", "process_manage", "env_var",
+        "file_info", "archive", "answer",
+    ],
+    "web_api": [
+        "http_request", "web_search", "read_url", "run_cmd",
+        "write_files", "answer",
+    ],
+    "database": [
+        "sqlite_query", "run_cmd", "read_files", "write_files",
+        "answer",
     ],
 }
 
@@ -38,11 +54,15 @@ MAX_TOOLS_PER_TURN = 8
 # ---------------------------------------------------------------------------
 
 FRAMEWORK_TOOLS: dict[str, list[str]] = {
-    "Laravel/PHP": ["laravel_create_project", "git_init"],
-    "Django/Python": ["python_execute", "git_init"],
-    "Node/Web": ["javascript_execute", "git_init"],
+    "Laravel/PHP": ["laravel_create_project", "run_cmd", "git_init"],
+    "Django/Python": ["python_execute", "run_cmd", "git_init"],
+    "Node/Web": ["javascript_execute", "run_cmd", "git_init"],
     "Vite": ["javascript_execute", "run_cmd"],
-    "Python": ["python_execute", "git_init"],
+    "Python": ["python_execute", "run_cmd", "git_init"],
+    "Rust": ["run_cmd", "git_init"],
+    "Go": ["run_cmd", "git_init"],
+    "Docker": ["run_cmd", "system_info"],
+    "Database": ["sqlite_query", "run_cmd"],
 }
 
 # ---------------------------------------------------------------------------
@@ -55,9 +75,9 @@ TOOL_EQUIVALENCES: dict[str, list[str]] = {
     "list_dir": ["workspace_scan", "workspace_map"],
     "workspace_scan": ["list_dir", "workspace_map"],
     "workspace_map": ["list_dir", "workspace_scan"],
-    "search_files": ["workspace_scan", "read_files"],
-    "web_search": ["read_url"],
-    "read_url": ["web_search"],
+    "search_files": ["workspace_scan", "read_files", "regex_tool"],
+    "web_search": ["read_url", "http_request"],
+    "read_url": ["web_search", "http_request"],
     "run_cmd": ["python_execute", "javascript_execute"],
     "python_execute": ["run_cmd"],
     "javascript_execute": ["run_cmd"],
@@ -69,6 +89,24 @@ TOOL_EQUIVALENCES: dict[str, list[str]] = {
     "delete_path": ["run_cmd"],
     "move_path": ["run_cmd"],
     "copy_path": ["run_cmd"],
+    "json_query": ["python_execute", "run_cmd"],
+    "csv_query": ["python_execute", "run_cmd"],
+    "text_transform": ["regex_tool", "python_execute"],
+    "regex_tool": ["text_transform", "search_files"],
+    "calculate": ["python_execute"],
+    "datetime_util": ["python_execute", "run_cmd"],
+    "system_info": ["run_cmd"],
+    "http_request": ["read_url", "web_search", "run_cmd"],
+    "sqlite_query": ["run_cmd", "python_execute"],
+    "archive": ["run_cmd"],
+    "clipboard": ["run_cmd"],
+    "env_var": ["run_cmd"],
+    "process_manage": ["run_cmd"],
+    "diff_files": ["run_cmd"],
+    "screenshot": ["run_cmd"],
+    "file_info": ["list_dir", "run_cmd"],
+    "scaffold": ["write_files"],
+    "timer": ["run_cmd"],
 }
 
 
@@ -242,5 +280,67 @@ class ToolRouter:
         # File search goals
         if any(kw in goal_lower for kw in ("find file", "search for", "grep", "locate")):
             additional.append("search_files")
+
+        # Data processing goals
+        if any(kw in goal_lower for kw in ("json", "parse json", "query json", "extract data")):
+            additional.append("json_query")
+        if any(kw in goal_lower for kw in ("csv", "spreadsheet", "tabular", "data analysis")):
+            additional.append("csv_query")
+        if any(kw in goal_lower for kw in ("regex", "pattern", "replace text", "transform")):
+            additional.append("regex_tool")
+
+        # Math/calculation goals
+        if any(kw in goal_lower for kw in ("calculate", "math", "compute", "formula", "convert")):
+            additional.append("calculate")
+
+        # Date/time goals
+        if any(kw in goal_lower for kw in ("date", "time", "timestamp", "timezone", "schedule")):
+            additional.append("datetime_util")
+
+        # System/admin goals
+        if any(kw in goal_lower for kw in ("system info", "cpu", "memory", "disk space", "processes")):
+            additional.append("system_info")
+        if any(kw in goal_lower for kw in ("kill process", "stop process", "background")):
+            additional.append("process_manage")
+
+        # API/HTTP goals
+        if any(kw in goal_lower for kw in ("api", "http", "request", "endpoint", "fetch", "post", "rest")):
+            additional.append("http_request")
+
+        # Database goals
+        if any(kw in goal_lower for kw in ("database", "sqlite", "sql", "query", "table")):
+            additional.append("sqlite_query")
+
+        # Archive goals
+        if any(kw in goal_lower for kw in ("zip", "archive", "compress", "extract", "tar", "unzip")):
+            additional.append("archive")
+
+        # Clipboard goals
+        if any(kw in goal_lower for kw in ("clipboard", "copy", "paste")):
+            additional.append("clipboard")
+
+        # Screenshot goals
+        if any(kw in goal_lower for kw in ("screenshot", "capture screen", "screen grab")):
+            additional.append("screenshot")
+
+        # Scaffold/template goals
+        if any(kw in goal_lower for kw in ("scaffold", "template", "boilerplate", "generate", "starter")):
+            additional.append("scaffold")
+
+        # Diff/compare goals
+        if any(kw in goal_lower for kw in ("diff", "compare", "difference")):
+            additional.append("diff_files")
+
+        # Environment variable goals
+        if any(kw in goal_lower for kw in ("env var", "environment variable", "set variable")):
+            additional.append("env_var")
+
+        # File info goals
+        if any(kw in goal_lower for kw in ("file size", "file info", "metadata", "hash", "checksum")):
+            additional.append("file_info")
+
+        # Timer goals
+        if any(kw in goal_lower for kw in ("timer", "remind", "alarm", "countdown")):
+            additional.append("timer")
 
         return additional

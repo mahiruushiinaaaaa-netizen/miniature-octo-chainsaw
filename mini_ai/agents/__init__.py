@@ -3,6 +3,7 @@ from .coder import apply_edit_block, find_blocks
 from .planner import create_plan
 from .reviewer import review_final_output
 from .orchestrator import orchestrated_agent_mode
+from .task_result import TaskResult
 
 __all__ = [
     "agent_mode",
@@ -12,4 +13,5 @@ __all__ = [
     "create_plan",
     "review_final_output",
     "orchestrated_agent_mode",
+    "TaskResult",
 ]

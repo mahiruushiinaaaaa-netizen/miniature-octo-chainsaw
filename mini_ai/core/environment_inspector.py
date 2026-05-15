@@ -8,20 +8,20 @@ def get_binary_version(binary: str) -> str:
     """Get the version of a binary if it exists."""
     if not shutil.which(binary):
         return "Not found"
-    
+
     try:
         # Most binaries support --version
         cmd = [binary, "--version"]
         if binary == "php":
             cmd = [binary, "-v"]
-        
+
         # Use shell=True on Windows for .cmd/.bat files like npm/composer
         is_windows = os.name == "nt"
         result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            timeout=5, 
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=5,
             shell=is_windows
         )
         if result.returncode == 0:
@@ -35,12 +35,18 @@ def inspect_environment() -> Dict[str, Any]:
     """Detect system capabilities and environment details categorized by stack."""
     # Grouped binaries to help prioritize relevance
     stacks = {
-        "Core": ["git", "docker", "python", "pip"],
-        "JS/Web": ["node", "npm", "npx", "yarn", "bun"],
+        "Core": ["git", "docker", "python", "pip", "uv", "poetry"],
+        "JS/Web": ["node", "npm", "npx", "yarn", "bun", "pnpm", "deno"],
         "PHP/Laravel": ["php", "composer", "laravel"],
-        "Mobile": ["java", "javac", "adb", "react-native", "expo", "pod"]
+        "Mobile": ["java", "javac", "adb", "react-native", "expo", "pod", "flutter", "dart"],
+        "Database": ["sqlite3", "mysql", "psql", "mongosh", "redis-cli"],
+        "Cloud/DevOps": ["docker", "kubectl", "terraform", "aws", "az", "gcloud", "vercel"],
+        "Rust/Go/C": ["cargo", "rustc", "go", "gcc", "dotnet"],
+        "Ruby": ["ruby", "gem", "bundle", "rails"],
+        "Media/Docs": ["ffmpeg", "pandoc", "magick"],
+        "Utils": ["curl", "wget", "jq", "gh", "make"],
     }
-    
+
     binaries_results = {}
     for stack, bin_list in stacks.items():
         for b in bin_list:
@@ -50,7 +56,7 @@ def inspect_environment() -> Dict[str, Any]:
                     "version": version,
                     "stack": stack
                 }
-    
+
     return {
         "os": platform.system(),
         "os_release": platform.release(),

@@ -130,10 +130,12 @@ class VLCPlayer:
             '--no-xlib',           # disable X11 (for headless)
             '--no-video',          # disable video output
             '--quiet',             # reduce VLC log noise
-            '--network-caching=3000',
+            '--network-caching=5000',
             '--file-caching=3000',
             '--no-video-title-show',
             '--no-snapshot-preview',
+            '--http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '--http-referrer=https://www.youtube.com/',
         ]
         instance = vlc.Instance(*options)
         if not instance:
@@ -145,29 +147,22 @@ class VLCPlayer:
         """Create media object with appropriate options."""
         media = instance.media_new(self.url)
         # Add network caching and disable video
-        media.add_option('network-caching=3000')
+        media.add_option('network-caching=5000')
         media.add_option('no-video')
+        # CRITICAL: YouTube streams require proper HTTP headers or they get rejected
+        media.add_option(':http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        media.add_option(':http-referrer=https://www.youtube.com/')
         # For local files, we can also add file-caching if needed
         return media
 
     def _wait_for_playing(self, timeout: float = 15.0) -> bool:
         """Wait until VLC state becomes PLAYING or ERROR, return True if playing."""
         start = time.time()
-        log_file = Path(tempfile.gettempdir()) / "miniai_audio_debug.log"
         while time.time() - start < timeout and not self._stop_requested:
             try:
                 state = self._player.get_state()
-            except Exception as e:
-                with open(log_file, 'a') as f:
-                    f.write(f"[{time.ctime()}] _wait_for_playing: get_state() raised: {e}\n")
-                return False
-
-            # Log state for diagnostics
-            try:
-                with open(log_file, 'a') as f:
-                    f.write(f"[{time.ctime()}] VLC state: {state}\n")
             except Exception:
-                pass
+                return False
 
             if state == vlc.State.Playing:
                 return True
@@ -457,19 +452,7 @@ class VLCPlayer:
             try:
                 state = self._player.get_state()
             except Exception as e:
-                try:
-                    with open(Path(tempfile.gettempdir()) / "miniai_audio_debug.log", 'a') as f:
-                        f.write(f"[{time.ctime()}] get_state() raised in loop: {e}\n")
-                except Exception:
-                    pass
                 break
-
-            # Log state each loop for diagnostics
-            try:
-                with open(Path(tempfile.gettempdir()) / "miniai_audio_debug.log", 'a') as f:
-                    f.write(f"[{time.ctime()}] Loop VLC state: {state}\n")
-            except Exception:
-                pass
 
             # Handle loop: if ended and loop is True, restart
             if state == vlc.State.Ended and self.loop and not self._stop_requested:
